@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="稍後讀">
+<title>稍後讀書架</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: ink on paper. No cards, only hairlines; the light serif days-left numeral carries each row, and vermilion appears only on what is about to die. */
+:root{
+  --bg:#F5F5F2; --ink:#161616; --muted:#5F5F5B; --line:#D4D4CF; --red:#B3261E; --on-ink:#F5F5F2;
+  --serif:"Noto Serif TC","Songti TC","PMingLiU",serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){--bg:#121211; --ink:#ECECE7; --muted:#A5A59F; --line:#34342F; --red:#EC6F63; --on-ink:#121211; color-scheme:dark;}
+}
+:root[data-theme="dark"]{--bg:#121211; --ink:#ECECE7; --muted:#A5A59F; --line:#34342F; --red:#EC6F63; --on-ink:#121211; color-scheme:dark;}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--serif);font-size:15px;line-height:1.6;-webkit-text-size-adjust:100%}
+button,input,textarea{font:inherit;color:inherit;border-radius:0}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+#app{height:100%;max-width:520px;margin:0 auto;display:flex;flex-direction:column}
+
+header{padding:calc(22px + env(safe-area-inset-top)) 28px 0;display:flex;flex-direction:column;gap:14px}
+.brand{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.brand h1{font-weight:600;font-size:28px;margin:0;letter-spacing:.12em}
+.sub,.k{font-size:12px;color:var(--muted);letter-spacing:.08em}
+.slots{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--ink);padding:10px 0 0}
+.dots{display:flex;align-items:center;flex-wrap:wrap;gap:7px}
+.dot{width:9px;height:9px;border:1px solid var(--ink)}
+.dot.on{background:var(--ink)}
+.dots .n{font-size:13px;margin-left:6px;font-variant-numeric:tabular-nums}
+.xp{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--muted);letter-spacing:.04em;border-bottom:1px solid var(--line);padding-bottom:10px}
+.bar{flex:1;height:1px;background:var(--line)}
+.bar i{display:block;height:1px;background:var(--ink)}
+
+main{flex:1;overflow-y:auto;padding:0 28px 150px;display:flex;flex-direction:column}
+.demo{border:1px solid var(--ink);padding:12px 14px;margin-top:16px;display:flex;align-items:center;justify-content:space-between;gap:14px;font-size:13px}
+.lead{font-size:13px;color:var(--muted);margin:6px 0 0}
+h2{font-size:20px;margin:22px 0 0;font-weight:600;letter-spacing:.04em;text-wrap:balance}
+
+.card{--tone:var(--ink);display:grid;grid-template-columns:76px 1fr;column-gap:14px;row-gap:6px;padding:18px 0 8px;border-bottom:1px solid var(--line)}
+.card.warn{--tone:var(--muted)}
+.card.dying{--tone:var(--red)}
+.left{grid-row:1 / span 3;display:flex;flex-direction:column;align-items:flex-start;gap:2px;color:var(--tone)}
+.left b{font-size:64px;font-weight:300;line-height:.95;font-variant-numeric:tabular-nums}
+.left span{font-size:11px;letter-spacing:.1em;white-space:nowrap}
+.title{font-size:18px;line-height:1.4;overflow-wrap:anywhere}
+.meta{font-size:12px;color:var(--muted);letter-spacing:.04em;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 12px}
+.life{grid-column:2;height:1px;background:var(--line);margin-top:2px}
+.life i{display:block;height:1px;background:var(--tone)}
+.acts{grid-column:2;display:flex;gap:18px;align-items:center}
+.btn{border:1px solid var(--ink);background:transparent;padding:8px 16px;font-size:14px;letter-spacing:.06em;text-decoration:none;color:var(--ink);display:inline-flex;align-items:center;justify-content:center;min-height:44px;white-space:nowrap}
+.btn.primary{background:var(--ink);color:var(--on-ink)}
+.btn.danger{border-color:var(--red);color:var(--red)}
+.btn.wide{width:100%}
+.btn[disabled]{opacity:.5}
+.acts .btn{border:0;padding:0;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:4px;letter-spacing:0}
+.acts .btn.primary{font-weight:600}
+.acts .btn.ghost{text-decoration:none;color:var(--muted);font-size:13px;margin-left:auto}
+.slot{padding:22px 0;color:var(--muted);font-size:13px;border-bottom:1px solid var(--line)}
+
+.tomb{padding:16px 0;border-bottom:1px solid var(--line);color:var(--muted)}
+.tomb .title{color:var(--muted);text-decoration:line-through;text-decoration-thickness:1px}
+.note{padding:20px 0 16px;border-bottom:1px solid var(--line)}
+.note q{font-size:20px;line-height:1.6;quotes:"「" "」";display:block;overflow-wrap:anywhere}
+.note a{color:var(--muted);text-underline-offset:3px;overflow-wrap:anywhere}
+
+.panel{display:flex;flex-direction:column;gap:10px;padding:0 0 22px;border-bottom:1px solid var(--line)}
+.panel > .lead:first-child{margin-top:22px}
+.big{font-size:64px;font-weight:300;line-height:1;font-variant-numeric:tabular-nums}
+.big small{font-size:13px;font-weight:400;color:var(--muted);margin-left:10px;letter-spacing:.04em}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left;padding-left:0}
+th:last-child,td:last-child{padding-right:0}
+th{font-weight:400;color:var(--muted);font-size:12px;letter-spacing:.06em}
+.badges{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
+.badge{padding:10px 0;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.badge b{display:block;font-size:16px;font-weight:400}
+.badge.got{color:var(--ink)}
+.badge.got b{font-weight:600}
+.rules{margin:0;padding-left:18px;font-size:13px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
+textarea,input[type=text],input[type=url],input[type=password]{width:100%;border:0;border-bottom:1px solid var(--ink);background:transparent;padding:8px 0;font-size:17px}
+textarea{min-height:92px;resize:vertical;border:1px solid var(--line);padding:10px 12px}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+
+.fab{position:fixed;left:50%;transform:translateX(-50%);width:min(464px,calc(100% - 56px));bottom:calc(66px + env(safe-area-inset-bottom));min-height:48px;background:var(--ink);color:var(--on-ink);border:1px solid var(--ink);font-size:15px;letter-spacing:.1em}
+.fab.full{background:var(--bg);color:var(--muted);border-color:var(--line)}
+nav{position:fixed;left:0;right:0;bottom:0;background:var(--bg);padding-bottom:env(safe-area-inset-bottom)}
+nav div{max-width:520px;margin:0 auto;padding:0 16px;display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--ink)}
+nav a{min-height:52px;display:flex;align-items:center;justify-content:center;text-decoration:none;color:var(--muted);font-size:14px;letter-spacing:.1em}
+nav a[aria-current="page"]{color:var(--ink);font-weight:600}
+
+#sheet{position:fixed;inset:0;background:color-mix(in srgb,#000 40%,transparent);display:flex;align-items:flex-end;justify-content:center;z-index:10}
+#sheet[hidden]{display:none}
+.sheet{background:var(--bg);width:100%;max-width:520px;border-top:1px solid var(--ink);padding:24px 28px calc(24px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:14px;max-height:92%;overflow-y:auto}
+.sheet h3{font-size:22px;font-weight:600;margin:0;letter-spacing:.08em}
+.sheet p{margin:0}
+.sheet form{display:flex;flex-direction:column;gap:14px}
+.sheet label,.sheet legend{font-size:12px;color:var(--muted);letter-spacing:.06em;display:block;margin-bottom:4px;padding:0}
+fieldset{border:0;margin:0;padding:0}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:0}
+.seg label{margin:0}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg span{display:flex;align-items:center;justify-content:center;min-height:44px;text-align:center;border:1px solid var(--ink);margin-left:-1px;font-size:13px;color:var(--ink)}
+.seg label:first-child span{margin-left:0}
+.seg input:checked + span{background:var(--ink);color:var(--on-ink)}
+.seg input:focus-visible + span{outline:2px solid var(--ink);outline-offset:3px}
+.err{color:var(--red);font-size:13px;min-height:1.2em;margin:0}
+.hint{font-size:12px;color:var(--muted);margin:0}
+#toast{position:fixed;left:50%;top:calc(14px + env(safe-area-inset-top));transform:translate(-50%,-140%);background:var(--ink);color:var(--on-ink);padding:10px 18px;font-size:14px;letter-spacing:.04em;z-index:20;transition:transform .25s,opacity .25s;max-width:88%;text-align:center;opacity:0;pointer-events:none}
+#toast.show{transform:translate(-50%,0);opacity:1}
+@media (prefers-reduced-motion:reduce){#toast{transition:none}}
+</style>
+</head>
+<body>
+<div id="app">
+  <header id="head"></header>
+  <main id="view"></main>
+</div>
+<button class="fab" id="fab" type="button" data-act="open-add">存入一篇</button>
+<nav aria-label="頁面"><div id="tabs"></div></nav>
+<div id="sheet" hidden></div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+"use strict";
+var SUPABASE_URL = "https://tpewyvstejqayifumdkz.supabase.co";   // 例：https://xxxx.supabase.co
+var SUPABASE_KEY = "sb_publishable_2NTTV3-4feXyoYeX4TrZfg_eAE9nzw1";   // Supabase 的 publishable / anon key
+var DAY = 864e5, LIFE = 14, XP = {s:10, m:25, l:50}, MIN_NOTE = 10;
+var SIZE = {s:"短", m:"中", l:"長"}, TYPE = {article:"文章", video:"影片"};
+var TABS = [["shelf","書架"],["graveyard","墓地"],["notes","收穫"],["me","我的"]];
+var LS_KEY = "readlater-shelf-v1";
+
+var SYNC_KEY = "readlater-sync-v1";
+var state, demo = false, client = null, loading = false, sync = null;
+var authBusy = false, authError = "", authNotice = "", authEmail = "";
+
+function esc(s){return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+function uid(){return Date.now().toString(36) + Math.random().toString(36).slice(2,7);}
+function level(xp){return Math.floor(xp/100) + 1;}
+function slotCap(xp){return Math.min(12, 4 + level(xp));}
+function weekIdx(t){var d = new Date(t); var n = Math.floor((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() - d.getTimezoneOffset()*60000)/DAY); return Math.floor((n + 3)/7);}
+function weekStart(idx){var utc = (idx*7 - 3)*DAY; var d = new Date(utc); return (d.getUTCMonth()+1) + "/" + d.getUTCDate();}
+function md(t){var d = new Date(t); return (d.getMonth()+1) + "/" + d.getDate();}
+function daysLeft(it, now){return Math.max(0, Math.ceil((it.expiresAt - now)/DAY));}
+function stage(n){return n >= 7 ? "fresh" : n >= 3 ? "warn" : "dying";}
+function stageName(s){return s === "fresh" ? "新鮮" : s === "warn" ? "泛黃" : "將枯";}
+function safeUrl(u){return /^https?:\/\//i.test(u) ? u : "#";}
+function platform(u){
+  var h = ""; try{h = new URL(u).hostname.replace(/^www\./,"");}catch(e){return "網頁";}
+  if(/weixin\.qq\.com$/.test(h)) return "微信";
+  if(/(^|\.)x\.com$|twitter\.com$|t\.co$/.test(h)) return "X";
+  if(/tiktok\.com$/.test(h)) return "TikTok";
+  if(/douyin\.com$/.test(h)) return "抖音";
+  if(/youtube\.com$|youtu\.be$/.test(h)) return "YouTube";
+  if(/bilibili\.com$|b23\.tv$/.test(h)) return "Bilibili";
+  return h || "網頁";
+}
+function fresh(){return {v:1, started:true, items:[], xp:0, streak:0, bestStreak:0, lastReadWeek:null, updatedAt:Date.now()};}
+function demoState(){
+  var now = Date.now();
+  function it(title,url,type,size,savedAgo,status,extra){
+    var o = {id:uid(), title:title, url:url, type:type, size:size, platform:platform(url), savedAt:now - savedAgo*DAY, expiresAt:now - savedAgo*DAY + LIFE*DAY, status:status};
+    for(var k in extra) o[k] = extra[k]; return o;
+  }
+  return {v:1, started:false, xp:85, streak:2, bestStreak:2, lastReadWeek:weekIdx(now), updatedAt:0, items:[
+    it("示例：一篇講注意力經濟的長文","https://mp.weixin.qq.com/","article","l",13.2,"active"),
+    it("示例：關於 AI 產品定價的長推","https://x.com/","article","m",9.5,"active"),
+    it("示例：20 分鐘的紀錄短片","https://www.tiktok.com/","video","m",5,"active"),
+    it("示例：年度閱讀清單","https://example.com/","article","s",1.5,"active"),
+    it("示例：為什麼我們總在收藏","https://mp.weixin.qq.com/","article","m",6,"read",{endedAt:now - 2*DAY, takeaway:"收藏帶來的是「已經擁有」的錯覺，而不是知識本身。"}),
+    it("示例：遊戲化設計的三個陷阱","https://example.com/","article","l",12,"read",{endedAt:now - 8*DAY, takeaway:"獎勵要綁在真正想要的行為上，否則只會養出打卡習慣。"}),
+    it("示例：一支沒來得及看的訪談","https://www.tiktok.com/","video","l",20,"expired",{endedAt:now - 6*DAY}),
+    it("示例：某篇當時覺得很重要的文章","https://x.com/","article","m",11,"dropped",{endedAt:now - 4*DAY})
+  ]};
+}
+
+/* ---------- persistence ---------- */
+function readLocal(){try{var s = localStorage.getItem(LS_KEY); return s ? JSON.parse(s) : null;}catch(e){return null;}}
+function writeLocal(){try{localStorage.setItem(LS_KEY, JSON.stringify(state));}catch(e){}}
+function commit(replace){
+  if(!demo){
+    state.updatedAt = Date.now();
+    if(sync){
+      sync.pending = true;
+      sync.revision++;
+      if(replace === true) sync.replacement = {};
+    }
+    writeLocal();
+    if(sync){writeSync(sync); flush(sync);}
+  }
+  render();
+}
+function settle(){
+  var now = Date.now(), changed = false;
+  state.items.forEach(function(it){
+    if(it.status === "active" && it.expiresAt <= now){it.status = "expired"; it.endedAt = it.expiresAt; changed = true;}
+  });
+  if(state.lastReadWeek != null && weekIdx(now) - state.lastReadWeek > 1 && state.streak !== 0){state.streak = 0; changed = true;}
+  return changed;
+}
+/* ---------- cloud sync ---------- */
+function clone(data){return JSON.parse(JSON.stringify(data));}
+function emptyBase(){return {items:[], xp:0, streak:0, bestStreak:0, lastReadWeek:null};}
+function readSync(){
+  try{return JSON.parse(localStorage.getItem(SYNC_KEY));}catch(e){return null;}
+}
+function writeSync(current){
+  try{
+    localStorage.setItem(SYNC_KEY, JSON.stringify({
+      userId:current.user.id, baseVersion:current.baseVersion, base:current.base,
+      pending:current.pending, replace:!!current.replacement
+    }));
+  }catch(e){}
+}
+function merge(base, local, remote){
+  var localItems = new Map(local.items.map(function(item){return [item.id, item];}));
+  var remoteItems = new Map(remote.items.map(function(item){return [item.id, item];}));
+  var baseRead = new Set(base.items.filter(function(item){return item.status === "read";}).map(function(item){return item.id;}));
+  var items = new Map(localItems), xp = remote.xp;
+  remoteItems.forEach(function(item, id){
+    var mine = localItems.get(id);
+    if(!mine || mine.status === "active" || item.status !== "active") items.set(id, item);
+  });
+  localItems.forEach(function(item, id){
+    var other = remoteItems.get(id);
+    if(item.status === "read" && !baseRead.has(id) && (!other || other.status !== "read")) xp += XP[item.size];
+  });
+  var localWeek = local.lastReadWeek == null ? -Infinity : local.lastReadWeek;
+  var remoteWeek = remote.lastReadWeek == null ? -Infinity : remote.lastReadWeek;
+  var latest = localWeek > remoteWeek ? local : remote;
+  var streak = localWeek === remoteWeek ? Math.max(local.streak, remote.streak) : latest.streak;
+  return {
+    v:1, started:!!(local.started || remote.started), items:clone(Array.from(items.values())),
+    xp:xp, streak:streak, bestStreak:Math.max(local.bestStreak, remote.bestStreak, streak),
+    lastReadWeek:latest.lastReadWeek, updatedAt:Date.now()
+  };
+}
+async function pull(current){
+  var result = await client.from("readlater_state").select("data, version").eq("user_id", current.user.id).maybeSingle();
+  if(result.error) throw result.error;
+  return result.data;
+}
+async function push(current){
+  var data = clone(state), revision = current.revision, replacement = current.replacement;
+  var baseVersion = current.baseVersion, version = baseVersion === null ? 1 : baseVersion + 1;
+  var table = client.from("readlater_state");
+  var result = baseVersion === null
+    ? await table.insert({data:data, version:version})
+    : await table.update({data:data, version:version}).eq("user_id", current.user.id).eq("version", baseVersion).select("version");
+  if(current !== sync) return true;
+  if(result.error){
+    if(baseVersion === null && result.error.code === "23505") return false;
+    throw result.error;
+  }
+  if(baseVersion !== null && !result.data.length) return false;
+  current.baseVersion = version;
+  current.base = data;
+  current.pending = current.revision !== revision;
+  if(current.replacement === replacement) current.replacement = null;
+  // Another tab may have saved its own pending changes during the request.
+  var stored = readLocal();
+  if(stored && JSON.stringify(stored) === JSON.stringify(state)) writeSync(current);
+  return true;
+}
+function resolve(current, remote){
+  state = merge(current.base, state, remote.data);
+  current.pending = true;
+}
+function applyRemote(current, remote){
+  var version = remote ? Number(remote.version) : null;
+  var changed = current.initial || version !== current.baseVersion;
+  if(remote && changed){
+    if(!current.replacement){
+      var emptyLocal = current.initial && current.baseVersion === null && state.items.length === 0 && state.xp === 0;
+      if(demo || !state.started || !current.pending || emptyLocal){
+        state = clone(remote.data);
+        current.pending = false;
+      }else if(version !== current.baseVersion){
+        resolve(current, remote);
+      }
+    }
+    current.base = clone(remote.data);
+  }else if(!remote){
+    if(demo) state = fresh();
+    current.base = emptyBase();
+    current.pending = true;
+  }
+  current.baseVersion = version;
+  current.initial = false;
+  demo = false;
+  if(settle()){
+    state.updatedAt = Date.now();
+    current.pending = true;
+    changed = true;
+  }
+  if(changed){
+    writeLocal();
+    writeSync(current);
+  }
+}
+async function runSync(current){
+  var conflicts = 0, pulledForReplacement = null;
+  while(current === sync && !current.paused && (current.pullRequested || current.pending)){
+    if(!navigator.onLine) throw new Error("offline");
+    if(current.pullRequested || (current.replacement && current.replacement !== pulledForReplacement)){
+      current.pullRequested = false;
+      pulledForReplacement = current.replacement;
+      var remote = await pull(current);
+      if(current !== sync || current.paused) return;
+      applyRemote(current, remote);
+      // A replacement made during this pull needs its own fresh version.
+      if(current.replacement && current.replacement !== pulledForReplacement) continue;
+    }
+    if(!current.pending) continue;
+    if(await push(current)){
+      conflicts = 0;
+    }else{
+      if(++conflicts > (current.replacement ? 1 : 3)) throw new Error("conflict");
+      current.pullRequested = true;
+    }
+  }
+}
+function flush(current){
+  if(current.running || current.paused) return;
+  current.error = false;
+  current.running = runSync(current).catch(function(){
+    current.error = true;
+    current.pullRequested = true;
+  }).finally(function(){
+    current.running = null;
+    if(current === sync) render();
+  });
+  renderHead();
+}
+function refreshSync(){
+  if(sync){
+    sync.pullRequested = true;
+    flush(sync);
+  }else if(settle()) commit();
+}
+function clearAccountData(){
+  sync = null;
+  try{
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(SYNC_KEY);
+  }catch(e){}
+  state = demoState();
+  demo = true;
+  closeSheet();
+}
+function setSession(session){
+  var user = session && session.user;
+  loading = false;
+  if(sync && user && sync.user.id === user.id) return;
+  if(sync) clearAccountData();
+  if(user){
+    var cache = readSync();
+    if(!cache || cache.userId !== user.id || !cache.base) cache = null;
+    var pending = !demo && (!cache || !!cache.pending || JSON.stringify(readLocal()) !== JSON.stringify(cache.base));
+    sync = {
+      user:user, baseVersion:cache ? cache.baseVersion : null, base:cache ? cache.base : emptyBase(),
+      pending:pending, revision:0, replacement:pending && cache && cache.replace ? {} : null,
+      initial:true, pullRequested:true, running:null, paused:false, error:false
+    };
+    authEmail = authError = authNotice = "";
+    flush(sync);
+  }
+  render();
+}
+function initSupabase(){
+  if(!SUPABASE_URL || !SUPABASE_KEY || !window.supabase) return;
+  try{client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);}
+  catch(e){return;}
+  loading = true;
+  var authEvent = 0;
+  client.auth.onAuthStateChange(function(event, session){
+    if(event === "INITIAL_SESSION") return;
+    var sequence = ++authEvent;
+    // Leave the auth callback before making any other Supabase requests.
+    setTimeout(function(){if(sequence === authEvent) setSession(session);}, 0);
+  });
+  var sequence = authEvent;
+  client.auth.getSession().then(function(result){
+    if(result.error) throw result.error;
+    if(sequence === authEvent) setSession(result.data.session);
+  }).catch(function(error){
+    if(sequence === authEvent){
+      authError = authMessage(error);
+      setSession(null);
+    }
+  });
+}
+function authMessage(error){
+  var message = error.message || String(error);
+  if(error.code === "invalid_credentials" || /invalid login credentials/i.test(message)) return "帳號或密碼錯誤。";
+  if(error.code === "email_not_confirmed" || /email not confirmed/i.test(message)) return "email 尚未確認。";
+  if(error.code === "weak_password" || /password.*(short|at least)/i.test(message)) return "密碼太短（至少 6 字）。";
+  if(!navigator.onLine || error.name === "AuthRetryableFetchError" || /fetch|network|load failed/i.test(message)) return "網路連不上。";
+  return "登入失敗：" + message;
+}
+async function submitAuth(form, signup){
+  if(authBusy || !client || sync) return;
+  var email = form.elements.email.value.trim(), password = form.elements.password.value;
+  authEmail = email;
+  authError = authNotice = "";
+  if(!email || !password) authError = "請輸入 email 和密碼。";
+  else if(signup && password.length < 6) authError = "密碼太短（至少 6 字）。";
+  if(authError){
+    document.getElementById("auth-error").textContent = authError;
+    document.getElementById("auth-notice").textContent = "";
+    return;
+  }
+  authBusy = true;
+  render();
+  try{
+    var result = signup
+      ? await client.auth.signUp({email:email, password:password, options:{emailRedirectTo:location.origin + location.pathname}})
+      : await client.auth.signInWithPassword({email:email, password:password});
+    if(result.error) throw result.error;
+    if(result.data.session) setSession(result.data.session);
+    else if(signup) authNotice = "確認信已寄到 " + email + "，點信裡的連結後回來登入。";
+  }catch(error){authError = authMessage(error);}
+  finally{authBusy = false; render();}
+}
+async function signOut(){
+  if(!sync || authBusy) return;
+  var current = sync;
+  authBusy = true;
+  current.paused = true;
+  closeSheet();
+  render();
+  try{
+    await current.running;
+    var result = await client.auth.signOut();
+    if(result.error) throw result.error;
+    if(sync === current) clearAccountData();
+  }catch(error){
+    if(sync === current){
+      current.paused = false;
+      authError = authMessage(error);
+      if(current.pending) flush(current);
+    }
+  }finally{authBusy = false; render();}
+}
+
+/* ---------- derived ---------- */
+function active(){return state.items.filter(function(i){return i.status === "active";}).sort(function(a,b){return a.expiresAt - b.expiresAt;});}
+function dead(){return state.items.filter(function(i){return i.status === "expired" || i.status === "dropped";}).sort(function(a,b){return b.endedAt - a.endedAt;});}
+function done(){return state.items.filter(function(i){return i.status === "read";}).sort(function(a,b){return b.endedAt - a.endedAt;});}
+function weekly(){
+  var cur = weekIdx(Date.now()), rows = [];
+  for(var w = cur; w > cur - 4; w--) rows.push({w:w, saved:0, read:0, expired:0, dropped:0});
+  state.items.forEach(function(it){
+    var s = cur - weekIdx(it.savedAt); if(s >= 0 && s < 4) rows[s].saved++;
+    if(it.status !== "active"){var e = cur - weekIdx(it.endedAt); if(e >= 0 && e < 4) rows[e][it.status]++;}
+  });
+  return rows;
+}
+
+/* ---------- render ---------- */
+function tab(){var h = location.hash.slice(1); return TABS.some(function(t){return t[0] === h;}) ? h : "shelf";}
+function syncStatus(){
+  if(loading) return "連線中…";
+  if(!sync) return demo ? "示例資料" : "僅存在此瀏覽器";
+  if(!navigator.onLine) return "離線，恢復連線後同步";
+  if(sync.running) return "同步中…";
+  if(sync.error) return "同步失敗，稍後重試";
+  return "已同步";
+}
+function renderHead(){
+  var act = active().length, cap = slotCap(state.xp), lv = level(state.xp), into = state.xp % 100;
+  var dots = ""; for(var i = 0; i < cap; i++) dots += '<i class="dot' + (i < act ? " on" : "") + '"></i>';
+  var status = syncStatus();
+  var accountStatus = document.getElementById("account-status");
+  if(accountStatus) accountStatus.textContent = status;
+  document.getElementById("head").innerHTML =
+    '<div class="brand"><h1>稍後讀</h1><span class="sub">第 ' + lv + ' 級 · 連勝 ' + state.streak + ' 週</span></div>' +
+    '<div class="slots"><span class="k">收藏位</span><div class="dots" role="img" aria-label="' + cap + ' 個收藏位已用 ' + act + ' 個">' + dots + '<span class="n">' + act + ' / ' + cap + '</span></div></div>' +
+    '<div class="xp"><span>距下一級 ' + (100 - into) + ' 分</span><div class="bar"><i style="width:' + into + '%"></i></div><span>' + status + '</span></div>';
+}
+function demoBanner(shelf){
+  if(!demo) return "";
+  var hint = shelf && client ? '已有帳號？到「我的」登入。' : "";
+  return '<div class="demo"><span>現在看到的是示例資料，可以隨意點按試玩。' + hint + '</span>' +
+    '<button class="btn primary" type="button" data-act="start"' + (loading ? " disabled" : "") + '>' +
+    (loading ? "連線中…" : "清空並開始") + '</button></div>';
+}
+function viewShelf(){
+  var now = Date.now(), list = active(), h = demoBanner(true);
+  if(!list.length) h += '<p class="lead">書架是空的。在別的應用裡複製連結，回來點「存入」。</p>';
+  list.forEach(function(it){
+    var n = daysLeft(it, now), st = stage(n), pct = Math.max(2, Math.min(100, (it.expiresAt - now)/(LIFE*DAY)*100));
+    h += '<article class="card ' + (st === "fresh" ? "" : st) + '">' +
+      '<div class="left"><b>' + n + '</b><span>天 · ' + stageName(st) + '</span></div>' +
+      '<div><div class="title">' + esc(it.title) + '</div>' +
+      '<div class="meta"><span>' + esc(it.platform) + ' · ' + TYPE[it.type] + ' · ' + SIZE[it.size] + '篇</span><span>讀完 +' + XP[it.size] + ' 分</span></div></div>' +
+      '<div class="life" aria-hidden="true"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
+      '<div class="acts"><a class="btn" href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer">去閱讀</a>' +
+      '<button class="btn primary" type="button" data-act="open-read" data-id="' + it.id + '">讀完了</button>' +
+      '<button class="btn ghost" type="button" data-act="open-drop" data-id="' + it.id + '">放棄</button></div></article>';
+  });
+  return h;
+}
+function viewGraveyard(){
+  var list = dead(), h = demoBanner() + '<h2>這裡躺著 ' + list.length + ' 篇你沒讀的東西</h2><p class="lead">墓碑永久保留，不能復活，連結也不再能點。</p>';
+  list.forEach(function(it){
+    h += '<article class="tomb"><div class="title">' + esc(it.title) + '</div><div class="meta"><span>' + esc(it.platform) + '</span><span>' + md(it.savedAt) + ' 存入 · ' + md(it.endedAt) + (it.status === "expired" ? " 過期" : " 放棄") + '</span></div></article>';
+  });
+  if(!list.length) h += '<div class="slot">目前沒有墓碑。保持下去。</div>';
+  return h;
+}
+function viewNotes(){
+  var list = done(), h = demoBanner() + '<h2>讀完 ' + list.length + ' 篇，留下 ' + list.length + ' 句話</h2>';
+  list.forEach(function(it){
+    h += '<article class="note"><q>' + esc(it.takeaway) + '</q><div class="meta"><a href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer">' + esc(it.title) + '</a><span>' + md(it.endedAt) + ' 讀完</span></div></article>';
+  });
+  if(!list.length) h += '<div class="slot">讀完第一篇後，你寫的那句話會出現在這裡。</div>';
+  return h;
+}
+function viewAccount(){
+  if(!client) return "";
+  var heading = '<section class="panel"><h2>帳號與同步</h2>';
+  var disabled = authBusy || loading ? " disabled" : "";
+  if(sync){
+    return heading + '<p class="lead" style="overflow-wrap:anywhere">已登入：' + esc(sync.user.email) + '</p>' +
+      '<p class="lead" id="account-status" role="status">' + syncStatus() + '</p>' +
+      '<p class="err" role="alert">' + esc(authError) + '</p>' +
+      '<div class="row"><button class="btn" type="button" data-act="open-signout"' + disabled + '>登出</button></div></section>';
+  }
+  return heading + '<p class="lead">登入後，手機和電腦會看到同一份資料。</p>' +
+    '<form id="f-auth" class="panel" style="padding:0;border:0" novalidate>' +
+    '<div><label for="auth-email">Email</label><input id="auth-email" name="email" type="text" inputmode="email" autocapitalize="none" autocomplete="email" value="' + esc(authEmail) + '"' + disabled + '></div>' +
+    '<div><label for="auth-password">密碼</label><input id="auth-password" name="password" type="password" autocomplete="current-password"' + disabled + '></div>' +
+    '<p class="lead" id="auth-notice" role="status" style="overflow-wrap:anywhere">' + esc(authNotice) + '</p>' +
+    '<p class="err" id="auth-error" role="alert" style="overflow-wrap:anywhere">' + esc(authError) + '</p>' +
+    '<div class="row"><button class="btn primary" type="submit"' + disabled + '>登入</button>' +
+    '<button class="btn" type="submit" value="signup"' + disabled + '>註冊新帳號</button></div></form></section>';
+}
+function viewMe(){
+  var rows = weekly(), saved = 0, read = 0;
+  rows.forEach(function(r){saved += r.saved; read += r.read;});
+  var rate = saved ? Math.round(read/saved*100) + "%" : "—";
+  var reads = done(), badges = [
+    ["第一篇", "讀完任意一篇", reads.length >= 1],
+    ["十篇", "累計讀完 10 篇", reads.length >= 10],
+    ["啃完長文", "讀完一篇長篇", reads.some(function(i){return i.size === "l";})],
+    ["連勝四週", "連續 4 週都有讀完", state.bestStreak >= 4]
+  ];
+  var h = viewAccount() + demoBanner() + '<section class="panel"><span class="lead">近四週讀完率（讀完 ÷ 存入）</span><div class="big">' + rate + '<small>讀完 ' + read + ' · 存入 ' + saved + '</small></div>' +
+    '<div class="tablewrap"><table><thead><tr><th>週（起始日）</th><th>存入</th><th>讀完</th><th>過期</th><th>放棄</th></tr></thead><tbody>';
+  rows.forEach(function(r, i){h += '<tr><td>' + weekStart(r.w) + (i === 0 ? "（本週）" : "") + '</td><td>' + r.saved + '</td><td>' + r.read + '</td><td>' + r.expired + '</td><td>' + r.dropped + '</td></tr>';});
+  h += '</tbody></table></div></section>';
+  h += '<section class="panel"><h2>成就</h2><div class="badges">';
+  badges.forEach(function(b){h += '<div class="badge' + (b[2] ? " got" : "") + '"><b>' + b[0] + '</b>' + b[1] + (b[2] ? " · 已達成" : "") + '</div>';});
+  h += '</div></section>';
+  h += '<section class="panel"><h2>規則</h2><ul class="rules"><li>收藏位起始 5 個，每升一級多 1 個，最多 12 個。位置滿了就不能再存。</li><li>每篇存入後有 ' + LIFE + ' 天壽命，過期進墓地。</li><li>主動放棄同樣進墓地。</li><li>讀完要寫一句至少 ' + MIN_NOTE + ' 個字的收穫，短篇 10 分、中篇 25 分、長篇 50 分，每 100 分升一級。</li><li>一週（週一到週日）至少讀完一篇，連勝加一；整週沒讀，連勝歸零。</li></ul></section>';
+  h += '<section class="panel"><h2>備份</h2><p class="lead">' + (sync ? "資料已存在雲端，換裝置登入同一帳號即可看到。備份只是多一層保險。" : "資料目前只存在這個瀏覽器，清除瀏覽資料會遺失，建議定期複製備份。") + '</p><div class="row"><button class="btn" type="button" data-act="copy-backup">複製備份文字</button><button class="btn" type="button" data-act="open-import">貼上備份還原</button><button class="btn danger" type="button" data-act="open-reset">全部清空</button></div></section>';
+  return h;
+}
+function render(){
+  var t = tab();
+  renderHead();
+  document.getElementById("view").innerHTML = t === "shelf" ? viewShelf() : t === "graveyard" ? viewGraveyard() : t === "notes" ? viewNotes() : viewMe();
+  document.getElementById("tabs").innerHTML = TABS.map(function(x){return '<a href="#' + x[0] + '"' + (x[0] === t ? ' aria-current="page"' : "") + '>' + x[1] + '</a>';}).join("");
+  var fab = document.getElementById("fab"), full = active().length >= slotCap(state.xp);
+  fab.hidden = t !== "shelf";
+  fab.className = "fab" + (full ? " full" : "");
+  fab.textContent = full ? "收藏位已滿 · 先讀完一篇" : "存入一篇 · 尚餘 " + (slotCap(state.xp) - active().length) + " 位";
+}
+
+/* ---------- sheets ---------- */
+var sheetEl = document.getElementById("sheet");
+function openSheet(html){sheetEl.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>'; sheetEl.hidden = false; var f = sheetEl.querySelector("input,textarea,button"); if(f) f.focus();}
+function closeSheet(){sheetEl.hidden = true; sheetEl.innerHTML = "";}
+function toast(msg){var t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(function(){t.classList.remove("show");}, 2600);}
+function find(id){for(var i = 0; i < state.items.length; i++) if(state.items[i].id === id) return state.items[i]; return null;}
+
+function sheetAdd(){
+  openSheet('<h3>存入一篇</h3><form id="f-add" novalidate>' +
+    '<div><label for="add-url">連結（直接貼上，連同分享文字也可以）</label><input id="add-url" type="text" inputmode="url" autocomplete="off" placeholder="https://"></div>' +
+    '<p class="hint" id="add-plat">&nbsp;</p>' +
+    '<div><label for="add-title">標題（寫你之後認得出來的名字）</label><input id="add-title" type="text" autocomplete="off" maxlength="80"></div>' +
+    '<fieldset><legend>類型</legend><div class="seg"><label><input type="radio" name="type" id="add-type-a" value="article" checked><span>文章</span></label><label><input type="radio" name="type" id="add-type-v" value="video"><span>影片</span></label></div></fieldset>' +
+    '<fieldset><legend>篇幅</legend><div class="seg"><label><input type="radio" name="size" id="add-size-s" value="s"><span>短 · 10 分鐘內</span></label><label><input type="radio" name="size" id="add-size-m" value="m" checked><span>中 · 10–30</span></label><label><input type="radio" name="size" id="add-size-l" value="l"><span>長 · 30 以上</span></label></div></fieldset>' +
+    '<p class="err" id="add-err"></p>' +
+    '<div class="row"><button class="btn primary" type="submit" style="flex:1">存入，開始 ' + LIFE + ' 天倒數</button><button class="btn" type="button" data-act="close">取消</button></div></form>');
+}
+function parseUrlField(){
+  var raw = document.getElementById("add-url").value, m = raw.match(/https?:\/\/[^\s]+/i);
+  var titleEl = document.getElementById("add-title");
+  if(m){
+    var rest = raw.replace(m[0], "").replace(/\s+/g, " ").trim();
+    if(rest && !titleEl.value) titleEl.value = rest.slice(0, 80);
+    document.getElementById("add-plat").textContent = "識別為：" + platform(m[0]);
+  } else document.getElementById("add-plat").innerHTML = "&nbsp;";
+  return m ? m[0] : null;
+}
+function submitAdd(){
+  var url = parseUrlField(), title = document.getElementById("add-title").value.trim(), err = document.getElementById("add-err");
+  if(!url){err.textContent = "沒有找到連結。請貼上以 http 開頭的網址。"; return;}
+  if(!title){err.textContent = "請填一個標題。"; return;}
+  if(active().length >= slotCap(state.xp)){err.textContent = "收藏位已滿，先讀完一篇。"; return;}
+  var now = Date.now();
+  state.items.push({id:uid(), url:url, title:title, type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active"});
+  closeSheet(); commit(); toast("已存入，" + LIFE + " 天後枯萎");
+}
+function sheetRead(it){
+  openSheet('<h3>讀完了</h3><p class="lead">' + esc(it.title) + '</p><form id="f-read" data-id="' + it.id + '" novalidate>' +
+    '<div><label for="read-note">用一句話寫下收穫（至少 ' + MIN_NOTE + ' 個字）</label><textarea id="read-note" maxlength="300"></textarea></div>' +
+    '<p class="err" id="read-err"></p>' +
+    '<div class="row"><button class="btn primary" type="submit" style="flex:1">提交，獲得 ' + XP[it.size] + ' 分</button><button class="btn" type="button" data-act="close">取消</button></div></form>');
+}
+function submitRead(id){
+  var it = find(id), note = document.getElementById("read-note").value.trim();
+  if(!it || it.status !== "active"){closeSheet(); return;}
+  if(note.length < MIN_NOTE){document.getElementById("read-err").textContent = "還差 " + (MIN_NOTE - note.length) + " 個字。"; return;}
+  var now = Date.now(), before = level(state.xp), wk = weekIdx(now);
+  it.status = "read"; it.endedAt = now; it.takeaway = note;
+  state.xp += XP[it.size];
+  if(state.lastReadWeek !== wk){state.streak = state.lastReadWeek === wk - 1 ? state.streak + 1 : 1; state.lastReadWeek = wk;}
+  if(state.streak > state.bestStreak) state.bestStreak = state.streak;
+  closeSheet(); commit();
+  toast(level(state.xp) > before ? "升到 Lv " + level(state.xp) + "，多了一個收藏位" : "+" + XP[it.size] + " 分，空出一個收藏位");
+}
+function sheetDrop(it){
+  openSheet('<h3>放棄這一篇？</h3><p class="lead">' + esc(it.title) + '</p><p>它會進入墓地並永久留在那裡，不能復活。</p>' +
+    '<div class="row"><button class="btn danger" type="button" data-act="confirm-drop" data-id="' + it.id + '" style="flex:1">放棄，送進墓地</button><button class="btn" type="button" data-act="close">再留一下</button></div>');
+}
+function sheetImport(){
+  openSheet('<h3>貼上備份還原</h3><p class="lead">還原會覆蓋目前的全部資料。</p><div><label for="imp-text">備份文字</label><textarea id="imp-text"></textarea></div><p class="err" id="imp-err"></p>' +
+    '<div class="row"><button class="btn primary" type="button" data-act="confirm-import" style="flex:1">覆蓋並還原</button><button class="btn" type="button" data-act="close">取消</button></div>');
+}
+function sheetReset(){
+  openSheet('<h3>全部清空？</h3><p>書架、墓地、收穫、等級和連勝都會歸零，無法復原。</p>' +
+    '<div class="row"><button class="btn danger" type="button" data-act="confirm-reset" style="flex:1">清空</button><button class="btn" type="button" data-act="close">取消</button></div>');
+}
+function sheetBackup(text){
+  openSheet('<h3>備份文字</h3><p class="lead">無法自動複製。請長按下方文字，全選後複製，貼到備忘錄保存。</p><textarea id="bk-text" readonly>' + esc(text) + '</textarea><button class="btn wide" type="button" data-act="close">完成</button>');
+}
+
+function sheetSignOut(){
+  openSheet('<h3>登出？</h3><p>登出後，這台裝置上的資料會清除，雲端資料保留，下次登入會回來。</p>' +
+    '<div class="row"><button class="btn danger" type="button" data-act="confirm-signout">登出</button>' +
+    '<button class="btn" type="button" data-act="close">取消</button></div>');
+}
+
+/* ---------- events ---------- */
+document.addEventListener("click", function(e){
+  if(e.target === sheetEl){closeSheet(); return;}
+  var el = e.target.closest("[data-act]"); if(!el) return;
+  var act = el.getAttribute("data-act"), id = el.getAttribute("data-id"), it = id ? find(id) : null;
+  if(act === "open-add"){ if(active().length >= slotCap(state.xp)) toast("收藏位已滿，先讀完一篇才能再存"); else sheetAdd(); }
+  else if(act === "open-read" && it) sheetRead(it);
+  else if(act === "open-drop" && it) sheetDrop(it);
+  else if(act === "confirm-drop" && it && it.status === "active"){ it.status = "dropped"; it.endedAt = Date.now(); closeSheet(); commit(); toast("已送進墓地"); }
+  else if(act === "close") closeSheet();
+  else if(act === "start"){ demo = false; state = fresh(); commit(); location.hash = "shelf"; toast("示例已清空，存入你的第一篇吧"); }
+  else if(act === "open-signout") sheetSignOut();
+  else if(act === "confirm-signout") signOut();
+  else if(act === "open-import") sheetImport();
+  else if(act === "open-reset") sheetReset();
+  else if(act === "confirm-reset"){ demo = false; state = fresh(); closeSheet(); commit(true); toast("已清空"); }
+  else if(act === "copy-backup"){
+    var text = JSON.stringify(state);
+    try{ navigator.clipboard.writeText(text).then(function(){toast("備份文字已複製");}, function(){sheetBackup(text);}); }catch(err){ sheetBackup(text); }
+  }
+  else if(act === "confirm-import"){
+    var errEl = document.getElementById("imp-err");
+    try{
+      var o = JSON.parse(document.getElementById("imp-text").value);
+      if(!o || !Array.isArray(o.items) || typeof o.xp !== "number") throw new Error("shape");
+      o.started = true; state = o; demo = false; settle(); closeSheet(); commit(true); toast("已還原");
+    }catch(err){ errEl.textContent = "這段文字不是有效的備份。請確認完整貼上。"; }
+  }
+});
+document.addEventListener("submit", function(e){
+  e.preventDefault();
+  if(e.target.id === "f-auth") submitAuth(e.target, e.submitter && e.submitter.value === "signup");
+  else if(e.target.id === "f-add") submitAdd();
+  else if(e.target.id === "f-read") submitRead(e.target.getAttribute("data-id"));
+});
+document.addEventListener("input", function(e){ if(e.target.id === "add-url") parseUrlField(); });
+document.addEventListener("keydown", function(e){ if(e.key === "Escape" && !sheetEl.hidden) closeSheet(); });
+window.addEventListener("hashchange", render);
+document.addEventListener("visibilitychange", function(){if(!document.hidden) refreshSync();});
+window.addEventListener("focus", function(){if(sync) refreshSync();});
+window.addEventListener("online", function(){if(sync) refreshSync();});
+window.addEventListener("offline", renderHead);
+
+/* ---------- boot ---------- */
+(function(){
+  var cache = readLocal();
+  if(cache && cache.started && Array.isArray(cache.items)){ state = cache; settle(); }
+  else { state = demoState(); demo = true; }
+  initSupabase();
+  render();
+})();
+</script>
+</body>
+</html>
