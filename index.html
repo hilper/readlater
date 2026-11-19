@@ -120,6 +120,14 @@ fieldset{border:0;margin:0;padding:0}
 #toast{position:fixed;left:50%;top:calc(14px + env(safe-area-inset-top));transform:translate(-50%,-140%);background:var(--ink);color:var(--on-ink);padding:10px 18px;font-size:14px;letter-spacing:.04em;z-index:20;transition:transform .25s,opacity .25s;max-width:88%;text-align:center;opacity:0;pointer-events:none}
 #toast.show{transform:translate(-50%,0);opacity:1}
 @media (prefers-reduced-motion:reduce){#toast{transition:none}}
+.reader{position:fixed;inset:0;display:flex;flex-direction:column;background:var(--bg);z-index:5}
+#app[hidden],.reader[hidden],.reader-bar[hidden],.reader-bottom .btn[hidden]{display:none}
+.reader-bar{display:flex;align-items:center;gap:12px;padding:8px max(16px,env(safe-area-inset-right)) 8px max(16px,env(safe-area-inset-left))}
+.reader-top{justify-content:space-between;border-bottom:1px solid var(--line);padding-top:calc(8px + env(safe-area-inset-top))}
+.reader-site{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
+.reader-bottom{justify-content:flex-end;border-top:1px solid var(--line);padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+.reader-frame{flex:1;width:100%;min-height:0;border:0}
+.reader-status{flex:1;margin:0;padding:22px 16px;text-align:center;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -128,7 +136,8 @@ fieldset{border:0;margin:0;padding:0}
   <main id="view"></main>
 </div>
 <button class="fab" id="fab" type="button" data-act="open-add">存入一篇</button>
-<nav aria-label="頁面"><div id="tabs"></div></nav>
+<nav id="nav" aria-label="頁面"><div id="tabs"></div></nav>
+<section class="reader" id="reader" aria-label="站內閱讀" hidden></section>
 <div id="sheet" hidden></div>
 <div id="toast" role="status" aria-live="polite"></div>
 
@@ -443,7 +452,7 @@ async function signOut(){
   render();
   try{
     await current.running;
-    var result = await client.auth.signOut();
+    var result = await client.auth.signOut({ scope: "local" });
     if(result.error) throw result.error;
     if(sync === current) clearAccountData();
   }catch(error){
@@ -470,7 +479,7 @@ function weekly(){
 }
 
 /* ---------- render ---------- */
-function tab(){var h = location.hash.slice(1); return TABS.some(function(t){return t[0] === h;}) ? h : "shelf";}
+function tab(){var h = location.hash.slice(1); return h.startsWith("read/") ? "reader" : TABS.some(function(t){return t[0] === h;}) ? h : "shelf";}
 function syncStatus(){
   if(loading) return "連線中…";
   if(!sync) return demo ? "示例資料" : "僅存在此瀏覽器";
@@ -507,7 +516,9 @@ function viewShelf(){
       '<div><div class="title">' + esc(it.title) + '</div>' +
       '<div class="meta"><span>' + esc(it.platform) + ' · ' + TYPE[it.type] + ' · ' + SIZE[it.size] + '篇</span><span>讀完 +' + XP[it.size] + ' 分</span></div></div>' +
       '<div class="life" aria-hidden="true"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
-      '<div class="acts"><a class="btn" href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer">去閱讀</a>' +
+      '<div class="acts">' + (it.article === "ok"
+        ? '<button class="btn" type="button" data-act="open-reader" data-id="' + esc(it.id) + '">閱讀</button>'
+        : '<a class="btn" href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer">去閱讀</a>') +
       '<button class="btn primary" type="button" data-act="open-read" data-id="' + it.id + '">讀完了</button>' +
       '<button class="btn ghost" type="button" data-act="open-drop" data-id="' + it.id + '">放棄</button></div></article>';
   });
@@ -524,7 +535,10 @@ function viewGraveyard(){
 function viewNotes(){
   var list = done(), h = demoBanner() + '<h2>讀完 ' + list.length + ' 篇，留下 ' + list.length + ' 句話</h2>';
   list.forEach(function(it){
-    h += '<article class="note"><q>' + esc(it.takeaway) + '</q><div class="meta"><a href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer">' + esc(it.title) + '</a><span>' + md(it.endedAt) + ' 讀完</span></div></article>';
+    var link = it.article === "ok"
+      ? 'href="' + readerHash(it.id) + '" data-act="open-reader" data-id="' + esc(it.id) + '"'
+      : 'href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer"';
+    h += '<article class="note"><q>' + esc(it.takeaway) + '</q><div class="meta"><a ' + link + '>' + esc(it.title) + '</a><span>' + md(it.endedAt) + ' 讀完</span></div></article>';
   });
   if(!list.length) h += '<div class="slot">讀完第一篇後，你寫的那句話會出現在這裡。</div>';
   return h;
@@ -569,8 +583,122 @@ function viewMe(){
   h += '<section class="panel"><h2>備份</h2><p class="lead">' + (sync ? "資料已存在雲端，換裝置登入同一帳號即可看到。備份只是多一層保險。" : "資料目前只存在這個瀏覽器，清除瀏覽資料會遺失，建議定期複製備份。") + '</p><div class="row"><button class="btn" type="button" data-act="copy-backup">複製備份文字</button><button class="btn" type="button" data-act="open-import">貼上備份還原</button><button class="btn danger" type="button" data-act="open-reset">全部清空</button></div></section>';
   return h;
 }
+var readerEl = document.getElementById("reader");
+var articleCache = new WeakMap(), readerPage = null;
+
+function readerHash(id){return "#read/" + encodeURIComponent(id);}
+function readerItem(){
+  var id;
+  try{id = decodeURIComponent(location.hash.slice(6));}catch(error){return null;}
+  return find(id);
+}
+function openReader(it){
+  history.pushState({readerFrom:tab()}, "", readerHash(it.id));
+  render();
+}
+function closeReader(){
+  var from = history.state && history.state.readerFrom;
+  if(TABS.some(function(t){return t[0] === from;})) history.back();
+  else{
+    history.replaceState(null, "", "#shelf");
+    render();
+  }
+}
+function readerDocument(it, article, theme){
+  return '<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<base target="_blank"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@300;400;600&display=swap">' +
+    '<style>:root{' + theme + '}*{box-sizing:border-box}' +
+    'body{margin:0;background:var(--bg);color:var(--ink);font:18px/1.8 var(--serif);overflow-wrap:anywhere;-webkit-text-size-adjust:100%}' +
+    'main{max-width:34em;margin:auto;padding:24px 16px}h1{font-size:26px;line-height:1.4;margin:0}' +
+    '.byline{font-size:12px;color:var(--muted);margin:.5em 0 0}p{margin:0 0 1em}' +
+    'div:not(:has(div,p,figure,ul,ol,blockquote,table,pre,h1,h2,h3,h4)){margin:0 0 1em}' +
+    'a{color:inherit;text-decoration:underline}' +
+    'img{max-width:100%;height:auto}figure{margin:1em 0}blockquote{margin:1em 0;padding-left:1em;border-left:1px solid var(--line)}' +
+    'pre,table{max-width:100%;overflow-x:auto}table{display:block}hr{border:0;border-top:1px solid var(--line);margin:1em 0}' +
+    '</style></head><body><main><h1>' + esc(article.title || it.title) + '</h1><p class="byline">' +
+    esc([article.byline, article.site_name].filter(Boolean).join(" · ")) + '</p><hr>' + article.content_html + '</main></body></html>';
+}
+async function loadArticle(page){
+  var cache = articleCache.get(page.account);
+  if(!cache){
+    cache = new Map();
+    articleCache.set(page.account, cache);
+  }
+  if(!cache.has(page.id)){
+    var request = (async function(){
+      try{
+        var result = await client.from("readlater_articles").select("title, byline, site_name, content_html, url")
+          .eq("user_id", page.account.user.id).eq("item_id", page.id).maybeSingle();
+        if(!result.error && result.data) return result.data;
+      }catch(error){}
+      return null;
+    })();
+    cache.set(page.id, request);
+  }
+  page.article = await cache.get(page.id);
+  if(!page.article) cache.delete(page.id);
+  if(readerPage === page && sync === page.account && location.hash === page.hash) render();
+}
+function renderReader(it){
+  if(!readerPage || readerPage.hash !== location.hash || readerPage.account !== sync || readerPage.id !== (it && it.id)){
+    readerPage = {hash:location.hash, account:sync, id:it && it.id};
+    readerEl.innerHTML = '<div class="reader-bar reader-top"><button class="btn" type="button" data-act="close-reader">← 返回</button>' +
+      '<span class="reader-site"></span></div><p class="reader-status" role="status">載入中…</p>' +
+      '<div class="reader-bar reader-bottom" hidden><a class="btn" target="_blank" rel="noopener noreferrer">原文 ↗</a>' +
+      '<button class="btn primary" type="button" data-act="open-read">讀完了</button></div>';
+    if(it) loadArticle(readerPage);
+  }
+  var article = readerPage.article;
+  if(article === undefined) return;
+  var bottom = readerEl.querySelector(".reader-bottom");
+  bottom.hidden = false;
+  bottom.querySelector("a").href = safeUrl((article && article.url) || it.url);
+  var readButton = bottom.querySelector("button");
+  readButton.hidden = !article || it.status !== "active";
+  readButton.dataset.id = it.id;
+  var status = readerEl.querySelector(".reader-status");
+  if(!article){
+    status.textContent = "正文暫時讀不到";
+    return;
+  }
+  readerEl.querySelector(".reader-site").textContent = article.site_name || "";
+  var style = getComputedStyle(document.documentElement);
+  var theme = ["--bg", "--ink", "--muted", "--line", "--serif", "color-scheme"].map(function(name){
+    return name + ":" + style.getPropertyValue(name);
+  }).join(";");
+  if(readerPage.theme === theme) return;
+  readerPage.theme = theme;
+  var previous = status || readerEl.querySelector("iframe");
+  var frame = document.createElement("iframe");
+  frame.className = "reader-frame";
+  frame.title = "文章正文";
+  frame.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+  frame.srcdoc = readerDocument(it, article, theme);
+  previous.replaceWith(frame);
+}
 function render(){
-  var t = tab();
+  var t = tab(), it;
+  if(t === "reader"){
+    it = readerItem();
+    var waiting = loading || (sync && sync.initial && sync.running && !it);
+    if(waiting || (sync && it && it.article === "ok" && (it.status === "active" || it.status === "read"))){
+      document.getElementById("app").hidden = true;
+      document.getElementById("nav").hidden = true;
+      document.getElementById("fab").hidden = true;
+      readerEl.hidden = false;
+      renderReader(waiting ? null : it);
+      return;
+    }
+    history.replaceState(null, "", "#shelf");
+    t = "shelf";
+  }
+  if(readerPage){
+    readerPage = null;
+    readerEl.hidden = true;
+    readerEl.replaceChildren();
+    document.getElementById("app").hidden = false;
+    document.getElementById("nav").hidden = false;
+  }
   renderHead();
   document.getElementById("view").innerHTML = t === "shelf" ? viewShelf() : t === "graveyard" ? viewGraveyard() : t === "notes" ? viewNotes() : viewMe();
   document.getElementById("tabs").innerHTML = TABS.map(function(x){return '<a href="#' + x[0] + '"' + (x[0] === t ? ' aria-current="page"' : "") + '>' + x[1] + '</a>';}).join("");
@@ -582,24 +710,105 @@ function render(){
 
 /* ---------- sheets ---------- */
 var sheetEl = document.getElementById("sheet");
+var pendingAdd;
+var activeExtracts = new Map(), articleCleanups = new WeakMap();
 function openSheet(html){sheetEl.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>'; sheetEl.hidden = false; var f = sheetEl.querySelector("input,textarea,button"); if(f) f.focus();}
-function closeSheet(){sheetEl.hidden = true; sheetEl.innerHTML = "";}
+function closeSheet(){pendingAdd = null; sheetEl.hidden = true; sheetEl.innerHTML = "";}
 function toast(msg){var t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(function(){t.classList.remove("show");}, 2600);}
 function find(id){for(var i = 0; i < state.items.length; i++) if(state.items[i].id === id) return state.items[i]; return null;}
 
 function sheetAdd(){
   openSheet('<h3>存入一篇</h3><form id="f-add" novalidate>' +
     '<div><label for="add-url">連結（直接貼上，連同分享文字也可以）</label><input id="add-url" type="text" inputmode="url" autocomplete="off" placeholder="https://"></div>' +
-    '<p class="hint" id="add-plat">&nbsp;</p>' +
+    '<div><p class="hint" id="add-plat">&nbsp;</p><p class="hint" id="add-extract" role="status" hidden></p></div>' +
     '<div><label for="add-title">標題（寫你之後認得出來的名字）</label><input id="add-title" type="text" autocomplete="off" maxlength="80"></div>' +
     '<fieldset><legend>類型</legend><div class="seg"><label><input type="radio" name="type" id="add-type-a" value="article" checked><span>文章</span></label><label><input type="radio" name="type" id="add-type-v" value="video"><span>影片</span></label></div></fieldset>' +
-    '<fieldset><legend>篇幅</legend><div class="seg"><label><input type="radio" name="size" id="add-size-s" value="s"><span>短 · 10 分鐘內</span></label><label><input type="radio" name="size" id="add-size-m" value="m" checked><span>中 · 10–30</span></label><label><input type="radio" name="size" id="add-size-l" value="l"><span>長 · 30 以上</span></label></div></fieldset>' +
+    '<fieldset><legend id="add-size-label">篇幅</legend><div class="seg"><label><input type="radio" name="size" id="add-size-s" value="s"><span>短 · 10 分鐘內</span></label><label><input type="radio" name="size" id="add-size-m" value="m" checked><span>中 · 10–30</span></label><label><input type="radio" name="size" id="add-size-l" value="l"><span>長 · 30 以上</span></label></div></fieldset>' +
     '<p class="err" id="add-err"></p>' +
     '<div class="row"><button class="btn primary" type="submit" style="flex:1">存入，開始 ' + LIFE + ' 天倒數</button><button class="btn" type="button" data-act="close">取消</button></div></form>');
+  pendingAdd = {pendingId:uid(), form:document.getElementById("f-add"), url:null, sequence:0};
+}
+function extractStatus(draft, message){
+  var hint = draft.form.querySelector("#add-extract");
+  hint.hidden = !message;
+  hint.textContent = message;
+}
+function extractForUrl(draft, url){
+  var account = sync;
+  if(draft.url === url && draft.account === account) return;
+  draft.url = url;
+  draft.account = account;
+  draft.article = undefined;
+  var sequence = ++draft.sequence;
+  clearTimeout(draft.timer);
+  var title = draft.form.querySelector("#add-title");
+  if(title.value === draft.autoTitle) title.value = "";
+  draft.autoTitle = undefined;
+  if(draft.autoSize){
+    draft.form.querySelector("#add-size-m").checked = true;
+    draft.form.querySelector("#add-size-label").textContent = "篇幅";
+    draft.autoSize = false;
+  }
+  extractStatus(draft, account && url ? "正在抓正文…" : "");
+  if(!account || !url) return;
+  draft.timer = setTimeout(function(){
+    // Writes for the same item must finish in URL order.
+    draft.request = Promise.resolve(draft.request).then(function(){
+      return runExtract(draft, url, sequence, account);
+    });
+  }, 400);
+}
+async function runExtract(draft, url, sequence, account){
+  await articleCleanups.get(account);
+  var itemId = draft.pendingId;
+  if(sync !== account || draft.sequence !== sequence || (!draft.form.isConnected && !find(itemId))) return;
+  var data, request;
+  try{
+    request = client.functions.invoke("extract", {body:{url, itemId}});
+    activeExtracts.set(request, account);
+    var result = await request;
+    if(!result.error && result.data && result.data.ok === true) data = result.data;
+  }catch(error){}
+  finally{activeExtracts.delete(request);}
+  if(sync !== account || draft.sequence !== sequence) return;
+  draft.article = data ? "ok" : "failed";
+  var it = find(itemId);
+  if(it && it.url === url && (it.status === "active" || it.status === "read")){
+    it.article = draft.article;
+    commit();
+  }
+  if(!draft.form.isConnected) return;
+  extractStatus(draft, data ? "已抓到正文 · 約 " + data.minutes + " 分鐘" : "抓不到正文，存入後會跳轉原網址閱讀");
+  if(!data) return;
+  var title = draft.form.querySelector("#add-title");
+  if(!title.value.trim()){
+    draft.autoTitle = String(data.title || "").slice(0, 80);
+    title.value = draft.autoTitle;
+  }
+  if(!draft.manualSize && ["s", "m", "l"].includes(data.size)){
+    draft.form.querySelector("#add-size-" + data.size).checked = true;
+    draft.form.querySelector("#add-size-label").textContent = "篇幅 · 自動判斷";
+    draft.autoSize = true;
+  }
+}
+function deleteArticles(account){
+  articleCache.delete(account);
+  // Let in-flight writes finish before the delete. New writes wait for cleanup.
+  var outstanding = Array.from(activeExtracts).filter(function(entry){return entry[1] === account;})
+    .map(function(entry){return entry[0];});
+  var previous = articleCleanups.get(account);
+  if(previous) outstanding.push(previous);
+  var cleanup = Promise.allSettled(outstanding).then(async function(){
+    if(sync !== account) return;
+    try{await client.from("readlater_articles").delete().eq("user_id", account.user.id);}
+    catch(error){}
+  });
+  articleCleanups.set(account, cleanup);
 }
 function parseUrlField(){
   var raw = document.getElementById("add-url").value, m = raw.match(/https?:\/\/[^\s]+/i);
   var titleEl = document.getElementById("add-title");
+  extractForUrl(pendingAdd, m ? m[0] : null);
   if(m){
     var rest = raw.replace(m[0], "").replace(/\s+/g, " ").trim();
     if(rest && !titleEl.value) titleEl.value = rest.slice(0, 80);
@@ -613,7 +822,9 @@ function submitAdd(){
   if(!title){err.textContent = "請填一個標題。"; return;}
   if(active().length >= slotCap(state.xp)){err.textContent = "收藏位已滿，先讀完一篇。"; return;}
   var now = Date.now();
-  state.items.push({id:uid(), url:url, title:title, type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active"});
+  var item = {id:pendingAdd.pendingId, url:url, title:title, type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active"};
+  if(pendingAdd.article) item.article = pendingAdd.article;
+  state.items.push(item);
   closeSheet(); commit(); toast("已存入，" + LIFE + " 天後枯萎");
 }
 function sheetRead(it){
@@ -632,6 +843,7 @@ function submitRead(id){
   if(state.lastReadWeek !== wk){state.streak = state.lastReadWeek === wk - 1 ? state.streak + 1 : 1; state.lastReadWeek = wk;}
   if(state.streak > state.bestStreak) state.bestStreak = state.streak;
   closeSheet(); commit();
+  if(tab() === "reader" && readerItem() === it) closeReader();
   toast(level(state.xp) > before ? "升到 Lv " + level(state.xp) + "，多了一個收藏位" : "+" + XP[it.size] + " 分，空出一個收藏位");
 }
 function sheetDrop(it){
@@ -662,6 +874,12 @@ document.addEventListener("click", function(e){
   var el = e.target.closest("[data-act]"); if(!el) return;
   var act = el.getAttribute("data-act"), id = el.getAttribute("data-id"), it = id ? find(id) : null;
   if(act === "open-add"){ if(active().length >= slotCap(state.xp)) toast("收藏位已滿，先讀完一篇才能再存"); else sheetAdd(); }
+  else if(act === "open-reader" && it){
+    if(e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    openReader(it);
+  }
+  else if(act === "close-reader") closeReader();
   else if(act === "open-read" && it) sheetRead(it);
   else if(act === "open-drop" && it) sheetDrop(it);
   else if(act === "confirm-drop" && it && it.status === "active"){ it.status = "dropped"; it.endedAt = Date.now(); closeSheet(); commit(); toast("已送進墓地"); }
@@ -671,7 +889,10 @@ document.addEventListener("click", function(e){
   else if(act === "confirm-signout") signOut();
   else if(act === "open-import") sheetImport();
   else if(act === "open-reset") sheetReset();
-  else if(act === "confirm-reset"){ demo = false; state = fresh(); closeSheet(); commit(true); toast("已清空"); }
+  else if(act === "confirm-reset"){
+    demo = false; state = fresh(); closeSheet(); commit(true); toast("已清空");
+    if(sync) deleteArticles(sync);
+  }
   else if(act === "copy-backup"){
     var text = JSON.stringify(state);
     try{ navigator.clipboard.writeText(text).then(function(){toast("備份文字已複製");}, function(){sheetBackup(text);}); }catch(err){ sheetBackup(text); }
@@ -691,9 +912,22 @@ document.addEventListener("submit", function(e){
   else if(e.target.id === "f-add") submitAdd();
   else if(e.target.id === "f-read") submitRead(e.target.getAttribute("data-id"));
 });
-document.addEventListener("input", function(e){ if(e.target.id === "add-url") parseUrlField(); });
+document.addEventListener("input", function(e){
+  if(e.target.id === "add-url") parseUrlField();
+  else if(e.target.id === "add-title" && pendingAdd) pendingAdd.autoTitle = undefined;
+});
+document.addEventListener("change", function(e){
+  if(pendingAdd && e.target.form === pendingAdd.form && e.target.name === "size"){
+    pendingAdd.manualSize = true;
+    pendingAdd.autoSize = false;
+    pendingAdd.form.querySelector("#add-size-label").textContent = "篇幅";
+  }
+});
 document.addEventListener("keydown", function(e){ if(e.key === "Escape" && !sheetEl.hidden) closeSheet(); });
 window.addEventListener("hashchange", render);
+function updateReaderTheme(){if(tab() === "reader") render();}
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateReaderTheme);
+new MutationObserver(updateReaderTheme).observe(document.documentElement, {attributes:true, attributeFilter:["data-theme"]});
 document.addEventListener("visibilitychange", function(){if(!document.hidden) refreshSync();});
 window.addEventListener("focus", function(){if(sync) refreshSync();});
 window.addEventListener("online", function(){if(sync) refreshSync();});
