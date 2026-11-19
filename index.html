@@ -711,6 +711,7 @@ function render(){
 /* ---------- sheets ---------- */
 var sheetEl = document.getElementById("sheet");
 var pendingAdd;
+var lastExtractRequestAt = null;
 var activeExtracts = new Map(), articleCleanups = new WeakMap();
 function openSheet(html){sheetEl.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>'; sheetEl.hidden = false; var f = sheetEl.querySelector("input,textarea,button"); if(f) f.focus();}
 function closeSheet(){pendingAdd = null; sheetEl.hidden = true; sheetEl.innerHTML = "";}
@@ -727,6 +728,12 @@ function sheetAdd(){
     '<p class="err" id="add-err"></p>' +
     '<div class="row"><button class="btn primary" type="submit" style="flex:1">存入，開始 ' + LIFE + ' 天倒數</button><button class="btn" type="button" data-act="close">取消</button></div></form>');
   pendingAdd = {pendingId:uid(), form:document.getElementById("f-add"), url:null, sequence:0};
+  var now = Date.now();
+  if(sync && (lastExtractRequestAt === null || now - lastExtractRequestAt >= 4 * 60 * 1000)){
+    lastExtractRequestAt = now;
+    try{client.functions.invoke("extract", {body:{warm:true}}).catch(function(){});}
+    catch(error){}
+  }
 }
 function extractStatus(draft, message){
   var hint = draft.form.querySelector("#add-extract");
@@ -764,6 +771,7 @@ async function runExtract(draft, url, sequence, account){
   if(sync !== account || draft.sequence !== sequence || (!draft.form.isConnected && !find(itemId))) return;
   var data, request;
   try{
+    lastExtractRequestAt = Date.now();
     request = client.functions.invoke("extract", {body:{url, itemId}});
     activeExtracts.set(request, account);
     var result = await request;
