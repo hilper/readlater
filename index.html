@@ -176,6 +176,10 @@ function platform(u){
   if(/bilibili\.com$|b23\.tv$/.test(h)) return "Bilibili";
   return h || "網頁";
 }
+function fallbackTitle(url){
+  var name = platform(url);
+  return name === "微信" ? "公眾號文章" : name + " 文章";
+}
 function fresh(){return {v:1, started:true, items:[], xp:0, streak:0, bestStreak:0, lastReadWeek:null, updatedAt:Date.now()};}
 function demoState(){
   var now = Date.now();
@@ -637,6 +641,15 @@ async function loadArticle(page){
   }
   page.article = await cache.get(page.id);
   if(!page.article) cache.delete(page.id);
+  if(sync === page.account && page.article){
+    var it = find(page.id), title = String(page.article.title || "").trim();
+    if(it && it.autoTitle === true && title){
+      it.title = title.slice(0, 80);
+      delete it.autoTitle;
+      commit();
+      return;
+    }
+  }
   if(readerPage === page && sync === page.account && location.hash === page.hash) render();
 }
 function renderReader(it){
@@ -735,10 +748,18 @@ function sheetAdd(){
     catch(error){}
   }
 }
+function isExtracting(draft, url){
+  if(!sync || draft.account !== sync || !url || draft.url !== url || draft.article !== undefined) return false;
+  try{return Boolean(new URL(url).hostname);}catch(error){return false;}
+}
 function extractStatus(draft, message){
   var hint = draft.form.querySelector("#add-extract");
+  var title = draft.form.querySelector("#add-title");
+  var canSaveWithoutTitle = isExtracting(draft, draft.url);
   hint.hidden = !message;
-  hint.textContent = message;
+  hint.textContent = canSaveWithoutTitle ? "正在抓正文… 可以直接存入" : message;
+  if(canSaveWithoutTitle) title.placeholder = "留空會自動用文章標題";
+  else title.removeAttribute("placeholder");
 }
 function extractForUrl(draft, url){
   var account = sync;
@@ -780,9 +801,18 @@ async function runExtract(draft, url, sequence, account){
   finally{activeExtracts.delete(request);}
   if(sync !== account || draft.sequence !== sequence) return;
   draft.article = data ? "ok" : "failed";
+  var extractedSize = data && ["s", "m", "l"].includes(data.size) ? data.size : null;
   var it = find(itemId);
   if(it && it.url === url && (it.status === "active" || it.status === "read")){
     it.article = draft.article;
+    if(it.status === "active"){
+      if(it.autoTitle === true){
+        var extractedTitle = data && String(data.title || "").trim();
+        if(extractedTitle) it.title = extractedTitle.slice(0, 80);
+        delete it.autoTitle;
+      }
+      if(!it.manualSize && extractedSize) it.size = extractedSize;
+    }
     commit();
   }
   if(!draft.form.isConnected) return;
@@ -793,8 +823,8 @@ async function runExtract(draft, url, sequence, account){
     draft.autoTitle = String(data.title || "").slice(0, 80);
     title.value = draft.autoTitle;
   }
-  if(!draft.manualSize && ["s", "m", "l"].includes(data.size)){
-    draft.form.querySelector("#add-size-" + data.size).checked = true;
+  if(!draft.manualSize && extractedSize){
+    draft.form.querySelector("#add-size-" + extractedSize).checked = true;
     draft.form.querySelector("#add-size-label").textContent = "篇幅 · 自動判斷";
     draft.autoSize = true;
   }
@@ -827,10 +857,12 @@ function parseUrlField(){
 function submitAdd(){
   var url = parseUrlField(), title = document.getElementById("add-title").value.trim(), err = document.getElementById("add-err");
   if(!url){err.textContent = "沒有找到連結。請貼上以 http 開頭的網址。"; return;}
-  if(!title){err.textContent = "請填一個標題。"; return;}
+  if(!title && !isExtracting(pendingAdd, url)){err.textContent = "請填一個標題。"; return;}
   if(active().length >= slotCap(state.xp)){err.textContent = "收藏位已滿，先讀完一篇。"; return;}
   var now = Date.now();
-  var item = {id:pendingAdd.pendingId, url:url, title:title, type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active"};
+  var item = {id:pendingAdd.pendingId, url:url, title:title || fallbackTitle(url), type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active"};
+  if(!title) item.autoTitle = true;
+  if(pendingAdd.manualSize) item.manualSize = true;
   if(pendingAdd.article) item.article = pendingAdd.article;
   state.items.push(item);
   closeSheet(); commit(); toast("已存入，" + LIFE + " 天後枯萎");
