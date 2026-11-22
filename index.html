@@ -133,7 +133,7 @@ fieldset{border:0;margin:0;padding:0}
 <body>
 <div id="app">
   <header id="head"></header>
-  <main id="view"></main>
+  <main id="view"><p class="lead">載入中…</p></main>
 </div>
 <button class="fab" id="fab" type="button" data-act="open-add">存入一篇</button>
 <nav id="nav" aria-label="頁面"><div id="tabs"></div></nav>
@@ -141,9 +141,54 @@ fieldset{border:0;margin:0;padding:0}
 <div id="sheet" hidden></div>
 <div id="toast" role="status" aria-live="polite"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+var hasRendered = false, startupErrorShown = false;
+
+window.addEventListener("error", showStartupError);
+window.addEventListener("unhandledrejection", showStartupError);
+
+function showStartupError(event){
+  if(hasRendered || startupErrorShown) return;
+  startupErrorShown = true;
+
+  var message = "未知錯誤";
+  if(event.type === "unhandledrejection"){
+    var reason = event.reason;
+    try{
+      message = reason && typeof reason.message === "string" ? reason.message : String(reason);
+    }catch(error){}
+  }else{
+    message = event.message || message;
+    if(event.filename || event.lineno || event.colno){
+      message += " (" + event.filename + ":" + event.lineno + ":" + event.colno + ")";
+    }
+  }
+
+  var view = document.getElementById("view");
+  var heading = document.createElement("p");
+  heading.className = "lead";
+  heading.textContent = "載入出錯，請截圖給 Claude：";
+  var detail = document.createElement("p");
+  detail.style.overflowWrap = "break-word";
+  detail.textContent = message;
+  var reload = document.createElement("button");
+  reload.className = "btn";
+  reload.type = "button";
+  reload.textContent = "重新載入";
+  reload.addEventListener("click", function(){location.reload();});
+
+  view.textContent = "";
+  view.appendChild(heading);
+  view.appendChild(detail);
+  view.appendChild(reload);
+  document.getElementById("reader").hidden = true;
+  document.getElementById("app").hidden = false;
+}
+</script>
+<script src="vendor/supabase-js-2.45.4.js"></script>
 <script>
 "use strict";
+
 var SUPABASE_URL = "https://tpewyvstejqayifumdkz.supabase.co";   // 例：https://xxxx.supabase.co
 var SUPABASE_KEY = "sb_publishable_2NTTV3-4feXyoYeX4TrZfg_eAE9nzw1";   // Supabase 的 publishable / anon key
 var DAY = 864e5, LIFE = 14, XP = {s:10, m:25, l:50}, MIN_NOTE = 10;
@@ -690,6 +735,7 @@ function renderReader(it){
   previous.replaceWith(frame);
 }
 function render(){
+  if(startupErrorShown) return;
   var t = tab(), it;
   if(t === "reader"){
     it = readerItem();
@@ -700,6 +746,7 @@ function render(){
       document.getElementById("fab").hidden = true;
       readerEl.hidden = false;
       renderReader(waiting ? null : it);
+      hasRendered = true;
       return;
     }
     history.replaceState(null, "", "#shelf");
@@ -719,6 +766,7 @@ function render(){
   fab.hidden = t !== "shelf";
   fab.className = "fab" + (full ? " full" : "");
   fab.textContent = full ? "收藏位已滿 · 先讀完一篇" : "存入一篇 · 尚餘 " + (slotCap(state.xp) - active().length) + " 位";
+  hasRendered = true;
 }
 
 /* ---------- sheets ---------- */
