@@ -115,6 +115,11 @@ fieldset{border:0;margin:0;padding:0}
 .seg label:first-child span{margin-left:0}
 .seg input:checked + span{background:var(--ink);color:var(--on-ink)}
 .seg input:focus-visible + span{outline:2px solid var(--ink);outline-offset:3px}
+.seg input:disabled + span{opacity:.55}
+#add-pdf{max-width:100%;font:inherit;font-size:13px;color:var(--muted)}
+.pdf-pick{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.pdf-pick label{margin:0}
+.pdf-pick .btn[hidden]{display:none}
 .err{color:var(--red);font-size:13px;min-height:1.2em;margin:0}
 .hint{font-size:12px;color:var(--muted);margin:0}
 #toast{position:fixed;left:50%;top:calc(14px + env(safe-area-inset-top));transform:translate(-50%,-140%);background:var(--ink);color:var(--on-ink);padding:10px 18px;font-size:14px;letter-spacing:.04em;z-index:20;transition:transform .25s,opacity .25s;max-width:88%;text-align:center;opacity:0;pointer-events:none}
@@ -128,6 +133,13 @@ fieldset{border:0;margin:0;padding:0}
 .reader-bottom{justify-content:flex-end;border-top:1px solid var(--line);padding-bottom:calc(8px + env(safe-area-inset-bottom))}
 .reader-frame{flex:1;width:100%;min-height:0;border:0}
 .reader-status{flex:1;margin:0;padding:22px 16px;text-align:center;color:var(--muted)}
+.reader-zoom{display:flex;gap:4px;flex:none}
+.reader-zoom .btn{padding-inline:10px}
+.pdf-scroll{flex:1;min-height:0;width:100%;max-width:920px;align-self:center;overflow:auto;overflow-anchor:none}
+.pdf-pages{position:relative;display:flex;flex-direction:column;gap:10px;min-width:100%;padding:10px}
+.pdf-page{flex:none;width:100%;overflow:hidden;background:#fff;outline:1px solid var(--line)}
+.pdf-page canvas{display:block;width:100%;height:100%}
+.pdf-page-error{color:#444}
 </style>
 </head>
 <body>
@@ -260,13 +272,71 @@ function commit(replace){
   }
   render();
 }
-function settle(){
+function settle(onExpire){
   var now = Date.now(), changed = false;
   state.items.forEach(function(it){
-    if(it.status === "active" && it.expiresAt <= now){it.status = "expired"; it.endedAt = it.expiresAt; changed = true;}
+    if(it.status === "active" && it.expiresAt <= now){
+      it.status = "expired"; it.endedAt = it.expiresAt; changed = true;
+      if(onExpire) onExpire(it);
+    }
   });
   if(state.lastReadWeek != null && weekIdx(now) - state.lastReadWeek > 1 && state.streak !== 0){state.streak = 0; changed = true;}
   return changed;
+}
+/* ---------- PDF storage and loading ---------- */
+var PDF_BUCKET = "readlater-pdfs", PDF_VENDOR = "vendor/pdfjs-3.11.174/";
+var pdfScript, bootExpiredPdfs, pdfUploads = new Map(), pdfCleanups = new WeakMap();
+function loadPdfJs(){
+  if(!pdfScript){
+    pdfScript = new Promise(function(resolve, reject){
+      var script = document.createElement("script");
+      script.src = PDF_VENDOR + "pdf.min.js";
+      script.onload = function(){
+        var lib = window.pdfjsLib;
+        if(!lib){script.remove(); reject(new Error("pdf.js")); return;}
+        lib.GlobalWorkerOptions.workerSrc = PDF_VENDOR + "pdf.worker.min.js";
+        resolve(lib);
+      };
+      script.onerror = function(){script.remove(); reject(new Error("pdf.js"));};
+      document.head.appendChild(script);
+    }).catch(function(error){pdfScript = null; throw error;});
+  }
+  return pdfScript;
+}
+function openPdf(lib, data){
+  return lib.getDocument({
+    data:data, cMapUrl:PDF_VENDOR + "cmaps/", cMapPacked:true,
+    // 相對路徑以網頁為基準，由主執行緒讀取這兩種資源。
+    standardFontDataUrl:PDF_VENDOR + "standard_fonts/", useWorkerFetch:false, isEvalSupported:false
+  });
+}
+function destroyPdf(resource){if(resource && !resource.destroyed) resource.destroy().catch(function(){});}
+function pdfStorage(){return client.storage.from(PDF_BUCKET);}
+function pdfPath(account, id){return account.user.id + "/" + id + ".pdf";}
+async function deletePdf(it){
+  if(!sync || !it.pdf || it.pdf.path !== pdfPath(sync, it.id) || String(it.id).includes("/")) return;
+  try{await pdfStorage().remove([it.pdf.path]);}catch(error){}
+}
+function deleteAllPdfs(account){
+  var outstanding = Array.from(pdfUploads).filter(function(entry){return entry[0].uploadAccount === account;})
+    .map(function(entry){return entry[1];});
+  var previous = pdfCleanups.get(account);
+  if(previous) outstanding.push(previous);
+  pdfCleanups.set(account, Promise.allSettled(outstanding).then(async function(){
+    if(sync !== account) return;
+    var bucket = pdfStorage(), paths = [], limit = 100;
+    try{
+      for(var offset = 0; sync === account; offset += limit){
+        var result = await bucket.list(account.user.id, {limit:limit, offset:offset, sortBy:{column:"name", order:"asc"}});
+        if(result.error) break;
+        result.data.forEach(function(file){if(file.id) paths.push(account.user.id + "/" + file.name);});
+        if(result.data.length < limit) break;
+      }
+      for(var i = 0; sync === account && i < paths.length; i += limit){
+        try{await bucket.remove(paths.slice(i, i + limit));}catch(error){}
+      }
+    }catch(error){}
+  }));
 }
 /* ---------- cloud sync ---------- */
 function clone(data){return JSON.parse(JSON.stringify(data));}
@@ -360,7 +430,16 @@ function applyRemote(current, remote){
   current.baseVersion = version;
   current.initial = false;
   demo = false;
-  if(settle()){
+  if(bootExpiredPdfs){
+    if(bootExpiredPdfs.userId === current.user.id){
+      bootExpiredPdfs.ids.forEach(function(id){
+        var it = find(id);
+        if(it && it.status === "expired") deletePdf(it);
+      });
+    }
+    bootExpiredPdfs = null;
+  }
+  if(settle(deletePdf)){
     state.updatedAt = Date.now();
     current.pending = true;
     changed = true;
@@ -412,6 +491,7 @@ function refreshSync(){
 }
 function clearAccountData(){
   sync = null;
+  bootExpiredPdfs = null;
   try{
     localStorage.removeItem(LS_KEY);
     localStorage.removeItem(SYNC_KEY);
@@ -435,6 +515,10 @@ function setSession(session){
       initial:true, pullRequested:true, running:null, paused:false, error:false
     };
     authEmail = authError = authNotice = "";
+    if(pendingAdd){
+      pendingAdd.form.querySelector("#add-pdf").disabled = false;
+      pendingAdd.form.querySelector("#add-pdf-login").hidden = true;
+    }
     flush(sync);
   }
   render();
@@ -563,12 +647,13 @@ function viewShelf(){
   list.forEach(function(it){
     var n = daysLeft(it, now), st = stage(n), pct = Math.max(2, Math.min(100, (it.expiresAt - now)/(LIFE*DAY)*100));
     var readLabel = it.pos > 0.02 ? "繼續 · " + Math.min(99, Math.round(it.pos * 100)) + "%" : "閱讀";
+    var meta = it.pdf ? "PDF · " + esc(it.pdf.pages) + " 頁" : esc(it.platform) + " · " + TYPE[it.type];
     h += '<article class="card ' + (st === "fresh" ? "" : st) + '">' +
       '<div class="left"><b>' + n + '</b><span>天 · ' + stageName(st) + '</span></div>' +
       '<div><div class="title">' + esc(it.title) + '</div>' +
-      '<div class="meta"><span>' + esc(it.platform) + ' · ' + TYPE[it.type] + ' · ' + SIZE[it.size] + '篇</span><span>讀完 +' + XP[it.size] + ' 分</span></div></div>' +
+      '<div class="meta"><span>' + meta + ' · ' + SIZE[it.size] + '篇</span><span>讀完 +' + XP[it.size] + ' 分</span></div></div>' +
       '<div class="life" aria-hidden="true"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
-      '<div class="acts">' + (it.article === "ok"
+      '<div class="acts">' + (hasReader(it)
         ? '<button class="btn" type="button" data-act="open-reader" data-id="' + esc(it.id) + '">' + readLabel + '</button>'
         : '<a class="btn" href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer">去閱讀</a>') +
       '<button class="btn primary" type="button" data-act="open-read" data-id="' + it.id + '">讀完了</button>' +
@@ -587,7 +672,7 @@ function viewGraveyard(){
 function viewNotes(){
   var list = done(), h = demoBanner() + '<h2>讀完 ' + list.length + ' 篇，留下 ' + list.length + ' 句話</h2>';
   list.forEach(function(it){
-    var link = it.article === "ok"
+    var link = hasReader(it)
       ? 'href="' + readerHash(it.id) + '" data-act="open-reader" data-id="' + esc(it.id) + '"'
       : 'href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer"';
     h += '<article class="note"><q>' + esc(it.takeaway) + '</q><div class="meta"><a ' + link + '>' + esc(it.title) + '</a><span>' + md(it.endedAt) + ' 讀完</span></div></article>';
@@ -639,6 +724,7 @@ var readerEl = document.getElementById("reader");
 var articleCache = new WeakMap(), readerPage = null;
 
 function readerHash(id){return "#read/" + encodeURIComponent(id);}
+function hasReader(it){return Boolean(it.pdf) || it.article === "ok";}
 function readerItem(){
   var id;
   try{id = decodeURIComponent(location.hash.slice(6));}catch(error){return null;}
@@ -673,46 +759,62 @@ function saveReaderProgress(){
   commit();
   return true;
 }
-function watchReaderFrame(page, frame, position){
-  var doc, win, lastY, readyCheck, loaded = false, userScrolled = false;
-  function current(){return readerPage === page && page.frame === frame;}
-  function scrollRange(){return Math.max(0, doc.scrollingElement.scrollHeight - win.innerHeight);}
-  function scrollY(range){return Math.min(range, Math.max(0, win.scrollY));}
+function watchReaderScroll(page, position, scroll){
+  var lastY, userScrolled = false;
+  function scrollY(range){return Math.min(range, Math.max(0, scroll.y()));}
   page.readPosition = function(forTheme){
-    if(!win) return position;
-    var range = scrollRange();
-    if(!loaded && !userScrolled && (!forTheme || !range)) return position;
+    if(!scroll.ready()) return position;
+    var range = scroll.range();
+    if(!scroll.loaded() && !userScrolled && (!forTheme || !range)) return position;
     return range ? scrollY(range) / range : 0;
   };
-  function restore(){
-    var range = scrollRange();
-    win.scrollTo(0, position * range);
+  function move(y){
+    scroll.move(y);
     // 捲動事件稍後才送達，先記下還原後的實際位置。
-    lastY = scrollY(range);
+    lastY = scrollY(scroll.range());
+  }
+  function restore(){
+    if(scroll.ready()) move(position * scroll.range());
   }
   page.restorePosition = function(pos){
     position = pos;
-    if(win) restore();
+    restore();
   };
   function onScroll(){
-    if(!current() || !win || page.account !== sync) return;
-    var range = scrollRange(), y = scrollY(range);
+    if(!scroll.current() || !scroll.ready() || page.account !== sync) return;
+    var range = scroll.range(), y = scrollY(range);
     if(y === Math.min(lastY, range)) return;
     lastY = y;
     userScrolled = page.userScrolled = true;
-    doc.documentElement.style.removeProperty("overflow-anchor");
+    if(scroll.onUserScroll) scroll.onUserScroll();
     var it = find(page.id);
     if(!it || it.status !== "active") return;
     clearTimeout(page.progressTimer);
     page.progressTimer = setTimeout(saveReaderProgress, 1500);
   }
   page.captureScroll = onScroll;
+  return {restore:restore, move:move, userScrolled:function(){return userScrolled;}};
+}
+function watchReaderFrame(page, frame, position){
+  var doc, win, readyCheck, loaded = false;
+  function current(){return readerPage === page && page.frame === frame;}
+  function enableAnchor(){doc.documentElement.style.removeProperty("overflow-anchor");}
+  var scroll = watchReaderScroll(page, position, {
+    current:current,
+    ready:function(){return Boolean(win);},
+    loaded:function(){return loaded;},
+    range:function(){return Math.max(0, doc.scrollingElement.scrollHeight - win.innerHeight);},
+    y:function(){return win.scrollY;},
+    move:function(y){win.scrollTo(0, y);},
+    onUserScroll:enableAnchor
+  });
+  var onScroll = page.captureScroll;
   function onReady(){
     if(!current() || win) return;
     win = frame.contentWindow;
     // 保留圖片載入前的還原基準，直到使用者捲動或整頁載入。
     doc.documentElement.style.setProperty("overflow-anchor", "none");
-    restore();
+    scroll.restore();
     win.addEventListener("scroll", onScroll);
   }
   function checkDocument(){
@@ -737,11 +839,27 @@ function watchReaderFrame(page, frame, position){
     if(!win) onReady();
     else{
       onScroll();
-      if(!userScrolled) restore();
+      if(!scroll.userScrolled()) scroll.restore();
     }
-    doc.documentElement.style.removeProperty("overflow-anchor");
+    enableAnchor();
   });
   readyCheck = requestAnimationFrame(checkDocument);
+}
+function updateReaderPosition(page, it){
+  var pos = Math.max(0, Math.min(1, it.pos || 0));
+  if(page.restorePosition && !page.userScrolled && page.savedPos !== pos){
+    page.captureScroll();
+    if(!page.userScrolled) page.restorePosition(pos);
+  }
+  page.savedPos = pos;
+  return pos;
+}
+function disposeReaderPage(){
+  if(!readerPage) return;
+  var page = readerPage;
+  readerPage = null;
+  clearTimeout(page.progressTimer);
+  if(page.disposePdf) page.disposePdf();
 }
 function readerDocument(it, article, theme){
   return '<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
@@ -787,24 +905,245 @@ async function loadArticle(page){
   }
   if(readerPage === page && sync === page.account && location.hash === page.hash) render();
 }
+function currentPdfReader(page){
+  return readerPage === page && page.account === sync && page.hash === location.hash;
+}
+async function setPdfDownload(page, path, link){
+  try{
+    var result = await pdfStorage().createSignedUrl(path, 3600);
+    if(!result.error && currentPdfReader(page)) link.href = result.data.signedUrl;
+  }catch(error){}
+}
+async function loadPdfReader(page, pdf, status, link, zoomOut, zoomIn){
+  var task, pdfDocument, releasePages;
+  page.disposePdf = function(){
+    if(releasePages) releasePages();
+    if(pdfDocument) destroyPdf(pdfDocument);
+    else destroyPdf(task);
+  };
+  try{
+    setPdfDownload(page, pdf.path, link);
+    var results = await Promise.all([loadPdfJs(), pdfStorage().download(pdf.path)]);
+    if(!currentPdfReader(page)) return;
+    if(results[1].error) throw results[1].error;
+    var buffer = await results[1].data.arrayBuffer();
+    if(!currentPdfReader(page)) return;
+    task = openPdf(results[0], buffer);
+    pdfDocument = await task.promise;
+    if(!currentPdfReader(page)) return;
+    var first = await pdfDocument.getPage(1);
+    if(!currentPdfReader(page)) return;
+    var viewport = first.getViewport({scale:1});
+    releasePages = mountPdfPages(page, pdfDocument, viewport.height / viewport.width, status, zoomOut, zoomIn);
+  }catch(error){
+    if(currentPdfReader(page)){
+      page.disposePdf();
+      page.disposePdf = null;
+      status.textContent = "PDF 暫時讀不到";
+      var container = readerEl.querySelector(".pdf-scroll");
+      if(container) container.replaceWith(status);
+    }
+  }
+}
+function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn){
+  var container = document.createElement("div"), pages = document.createElement("div");
+  container.className = "pdf-scroll";
+  container.tabIndex = 0;
+  container.setAttribute("aria-label", "PDF 閱讀區");
+  pages.className = "pdf-pages";
+  container.appendChild(pages);
+  var slots = [], nearby = new Set(), rendered = new Set(), drawing = new Set();
+  var zooms = [1, 1.5, 2, 3], zoom = 0, width = 0, height = 0, observer, refreshFrame;
+  for(var i = 1; i <= pdfDocument.numPages; i++){
+    var element = document.createElement("div");
+    element.className = "pdf-page";
+    element.dataset.page = i;
+    pages.appendChild(element);
+    slots.push({number:i, element:element, ratio:defaultRatio});
+  }
+  status.replaceWith(container);
+  var scroll = watchReaderScroll(page, page.savedPos, {
+    current:function(){return readerPage === page;},
+    ready:function(){return width > 0;},
+    loaded:function(){return true;},
+    range:function(){return Math.max(0, container.scrollHeight - container.clientHeight);},
+    y:function(){return container.scrollTop;},
+    move:function(y){container.scrollTop = y;}
+  });
+  function resizeSlot(slot){slot.element.style.height = Math.max(1, Math.round(width * slot.ratio)) + "px";}
+  function layout(){
+    var nextWidth = Math.max(1, container.clientWidth - 20) * zooms[zoom];
+    var nextHeight = container.clientHeight;
+    if(nextWidth !== width){
+      var position = page.savedPos, x = 0;
+      if(width){
+        page.captureScroll();
+        if(page.userScrolled) position = page.readPosition();
+        x = container.scrollLeft * nextWidth / width;
+        rendered.forEach(release);
+        drawing.forEach(cancel);
+      }
+      width = nextWidth;
+      pages.style.width = width + 20 + "px";
+      slots.forEach(resizeSlot);
+      page.restorePosition(position);
+      container.scrollLeft = x;
+    }else if(nextHeight !== height && !page.userScrolled){
+      scroll.restore();
+    }
+    if(!observer || nextHeight !== height){
+      height = nextHeight;
+      if(observer) observer.disconnect();
+      nearby.clear();
+      observer = new IntersectionObserver(function(entries, source){
+        if(source !== observer || !currentPdfReader(page)) return;
+        entries.forEach(function(entry){
+          var slot = slots[Number(entry.target.dataset.page) - 1];
+          if(entry.isIntersecting) nearby.add(slot);
+          else nearby.delete(slot);
+        });
+        schedule();
+      }, {root:container, rootMargin:height + "px 0px"});
+      slots.forEach(function(slot){observer.observe(slot.element);});
+    }
+    zoomOut.disabled = zoom === 0;
+    zoomIn.disabled = zoom === zooms.length - 1;
+    schedule();
+  }
+  function release(slot){
+    rendered.delete(slot);
+    slot.element.replaceChildren();
+    if(slot.canvas) slot.canvas.width = slot.canvas.height = 0;
+    if(slot.pdfPage) slot.pdfPage.cleanup();
+    slot.canvas = slot.pdfPage = null;
+  }
+  function cancel(slot){
+    slot.cancelled = true;
+    if(slot.task) slot.task.cancel();
+  }
+  function pageAt(y){
+    var low = 0, high = slots.length - 1;
+    while(low < high){
+      var mid = Math.floor((low + high) / 2), el = slots[mid].element;
+      if(el.offsetTop + el.offsetHeight <= y) low = mid + 1;
+      else high = mid;
+    }
+    return low + 1;
+  }
+  function schedule(){
+    if(!refreshFrame) refreshFrame = requestAnimationFrame(refresh);
+  }
+  function refresh(){
+    refreshFrame = null;
+    if(!currentPdfReader(page)) return;
+    var first = pageAt(container.scrollTop), last = pageAt(container.scrollTop + height);
+    function distance(slot){return Math.max(first - slot.number, slot.number - last, 0);}
+    function outside(slot){return distance(slot) > 5 || (zoom > 0 && !nearby.has(slot));}
+    rendered.forEach(function(slot){if(outside(slot)) release(slot);});
+    drawing.forEach(function(slot){if(outside(slot)) cancel(slot);});
+    Array.from(nearby).sort(function(a,b){return distance(a) - distance(b);}).some(function(slot){
+      if(drawing.size >= 2) return true;
+      if(distance(slot) <= 5 && !rendered.has(slot) && !drawing.has(slot)) draw(slot);
+      return false;
+    });
+  }
+  async function draw(slot){
+    drawing.add(slot);
+    slot.cancelled = false;
+    var pdfPage, canvas;
+    function current(){return !slot.cancelled && currentPdfReader(page);}
+    try{
+      pdfPage = await pdfDocument.getPage(slot.number);
+      if(!current()) return;
+      var natural = pdfPage.getViewport({scale:1}), ratio = natural.height / natural.width;
+      if(ratio !== slot.ratio){
+        page.captureScroll();
+        var y = container.scrollTop, el = slot.element, oldHeight = el.offsetHeight;
+        var above = el.offsetTop + oldHeight <= y;
+        slot.ratio = ratio;
+        resizeSlot(slot);
+        if(!page.userScrolled) scroll.restore();
+        else scroll.move(y + (above ? el.offsetHeight - oldHeight : 0));
+      }
+      var pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      var viewport = pdfPage.getViewport({scale:width * pixelRatio / natural.width});
+      canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.ceil(viewport.width));
+      canvas.height = Math.max(1, Math.ceil(viewport.height));
+      canvas.setAttribute("aria-label", "第 " + slot.number + " 頁");
+      slot.task = pdfPage.render({canvasContext:canvas.getContext("2d"), viewport:viewport});
+      await slot.task.promise;
+      if(!current()) return;
+      slot.element.replaceChildren(canvas);
+      slot.canvas = canvas;
+      slot.pdfPage = pdfPage;
+      rendered.add(slot);
+    }catch(error){
+      if(current()){
+        var message = document.createElement("p");
+        message.className = "reader-status pdf-page-error";
+        message.textContent = "PDF 暫時讀不到";
+        slot.element.replaceChildren(message);
+        rendered.add(slot);
+      }
+    }finally{
+      slot.task = null;
+      drawing.delete(slot);
+      if(canvas && slot.canvas !== canvas) canvas.width = canvas.height = 0;
+      if(pdfPage && slot.pdfPage !== pdfPage) pdfPage.cleanup();
+      if(currentPdfReader(page)) schedule();
+    }
+  }
+  function onScroll(){page.captureScroll(); schedule();}
+  container.addEventListener("scroll", onScroll, {passive:true});
+  zoomOut.addEventListener("click", function(){if(zoom > 0){zoom--; layout();}});
+  zoomIn.addEventListener("click", function(){if(zoom < zooms.length - 1){zoom++; layout();}});
+  layout();
+  var resize = new ResizeObserver(function(){if(currentPdfReader(page)) layout();});
+  resize.observe(container);
+  return function(){
+    resize.disconnect();
+    observer.disconnect();
+    container.removeEventListener("scroll", onScroll);
+    cancelAnimationFrame(refreshFrame);
+    drawing.forEach(cancel);
+    rendered.forEach(release);
+  };
+}
 function renderReader(it){
-  if(!readerPage || readerPage.hash !== location.hash || readerPage.account !== sync || readerPage.id !== (it && it.id)){
-    if(readerPage) clearTimeout(readerPage.progressTimer);
-    readerPage = {hash:location.hash, account:sync, id:it && it.id};
+  var pdf = it && it.pdf, path = pdf && pdf.path;
+  if(!readerPage || readerPage.hash !== location.hash || readerPage.account !== sync || readerPage.id !== (it && it.id) ||
+      readerPage.pdfPath !== path || readerPage.isPdf !== Boolean(pdf)){
+    disposeReaderPage();
+    readerPage = {hash:location.hash, account:sync, id:it && it.id, pdfPath:path, isPdf:Boolean(pdf)};
     readerEl.innerHTML = '<div class="reader-bar reader-top"><button class="btn" type="button" data-act="close-reader">← 返回</button>' +
-      '<span class="reader-site"></span></div><p class="reader-status" role="status">載入中…</p>' +
-      '<div class="reader-bar reader-bottom" hidden><a class="btn" target="_blank" rel="noopener noreferrer">原文 ↗</a>' +
+      '<span class="reader-site"></span>' + (pdf
+        ? '<div class="reader-zoom"><button class="btn" type="button" aria-label="縮小" disabled>−</button>' +
+          '<button class="btn" type="button" aria-label="放大" disabled>＋</button></div>' : '') +
+      '</div><p class="reader-status" role="status">載入中…</p>' +
+      '<div class="reader-bar reader-bottom" hidden><a class="btn" target="_blank" rel="noopener noreferrer">' +
+      (pdf ? '下載 PDF' : '原文 ↗') + '</a>' +
       '<button class="btn primary" type="button" data-act="open-read">讀完了</button></div>';
-    if(it) loadArticle(readerPage);
+    if(pdf){
+      updateReaderPosition(readerPage, it);
+      var zoomButtons = readerEl.querySelectorAll(".reader-zoom button");
+      loadPdfReader(readerPage, pdf, readerEl.querySelector(".reader-status"), readerEl.querySelector(".reader-bottom a"),
+        zoomButtons[0], zoomButtons[1]);
+    }else if(it) loadArticle(readerPage);
   }
   var article = readerPage.article;
-  if(article === undefined) return;
+  if(!pdf && article === undefined) return;
   var bottom = readerEl.querySelector(".reader-bottom");
   bottom.hidden = false;
-  bottom.querySelector("a").href = safeUrl((article && article.url) || it.url);
   var readButton = bottom.querySelector("button");
-  readButton.hidden = !article || it.status !== "active";
+  readButton.hidden = (!pdf && !article) || it.status !== "active";
   readButton.dataset.id = it.id;
+  if(pdf){
+    readerEl.querySelector(".reader-site").textContent = pdf.name;
+    updateReaderPosition(readerPage, it);
+    return;
+  }
+  bottom.querySelector("a").href = safeUrl((article && article.url) || it.url);
   var status = readerEl.querySelector(".reader-status");
   if(!article){
     status.textContent = "正文暫時讀不到";
@@ -815,12 +1154,7 @@ function renderReader(it){
   var theme = ["--bg", "--ink", "--muted", "--line", "--serif", "color-scheme"].map(function(name){
     return name + ":" + style.getPropertyValue(name);
   }).join(";");
-  var pos = Math.max(0, Math.min(1, it.pos || 0));
-  if(readerPage.restorePosition && !readerPage.userScrolled && readerPage.savedPos !== pos){
-    readerPage.captureScroll();
-    if(!readerPage.userScrolled) readerPage.restorePosition(pos);
-  }
-  readerPage.savedPos = pos;
+  var pos = updateReaderPosition(readerPage, it);
   if(readerPage.theme === theme) return;
   readerPage.theme = theme;
   var previous = status || readerPage.frame;
@@ -838,11 +1172,12 @@ function renderReader(it){
 }
 function render(){
   if(startupErrorShown) return;
+  if(pendingAdd && pendingAdd.form.isConnected) updatePdfPicker(pendingAdd);
   var t = tab(), it;
   if(t === "reader"){
     it = readerItem();
     var waiting = loading || (sync && sync.initial && sync.running && !it);
-    if(waiting || (sync && it && it.article === "ok" && (it.status === "active" || it.status === "read"))){
+    if(waiting || (sync && it && hasReader(it) && (it.status === "active" || it.status === "read"))){
       document.getElementById("app").hidden = true;
       document.getElementById("nav").hidden = true;
       document.getElementById("fab").hidden = true;
@@ -855,8 +1190,7 @@ function render(){
     t = "shelf";
   }
   if(readerPage){
-    clearTimeout(readerPage.progressTimer);
-    readerPage = null;
+    disposeReaderPage();
     readerEl.hidden = true;
     readerEl.replaceChildren();
     document.getElementById("app").hidden = false;
@@ -877,14 +1211,25 @@ var sheetEl = document.getElementById("sheet");
 var pendingAdd;
 var lastExtractRequestAt = null;
 var activeExtracts = new Map(), articleCleanups = new WeakMap();
-function openSheet(html){sheetEl.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>'; sheetEl.hidden = false; var f = sheetEl.querySelector("input,textarea,button"); if(f) f.focus();}
-function closeSheet(){pendingAdd = null; sheetEl.hidden = true; sheetEl.innerHTML = "";}
+function openSheet(html){
+  if(pendingAdd){cancelPdfCheck(pendingAdd); pendingAdd = null;}
+  sheetEl.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>';
+  sheetEl.hidden = false;
+  var f = sheetEl.querySelector("input,textarea,button"); if(f) f.focus();
+}
+function closeSheet(){
+  if(pendingAdd) cancelPdfCheck(pendingAdd);
+  pendingAdd = null; sheetEl.hidden = true; sheetEl.innerHTML = "";
+}
 function toast(msg){var t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(function(){t.classList.remove("show");}, 2600);}
 function find(id){for(var i = 0; i < state.items.length; i++) if(state.items[i].id === id) return state.items[i]; return null;}
 
 function sheetAdd(){
   openSheet('<h3>存入一篇</h3><form id="f-add" novalidate>' +
     '<div><label for="add-url">連結（直接貼上，連同分享文字也可以）</label><input id="add-url" type="text" inputmode="url" autocomplete="off" placeholder="https://"></div>' +
+    '<div class="pdf-pick"><label for="add-pdf">或選本機 PDF：</label><input id="add-pdf" type="file" accept="application/pdf,.pdf"' +
+    (sync ? '' : ' disabled') + '> <span class="hint" id="add-pdf-login"' + (sync ? ' hidden' : '') + '>登入後才能存 PDF</span>' +
+    '<button class="btn" type="button" data-act="clear-pdf" hidden>移除 PDF</button></div>' +
     '<div><p class="hint" id="add-plat">&nbsp;</p><p class="hint" id="add-extract" role="status" hidden></p></div>' +
     '<div><label for="add-title">標題（寫你之後認得出來的名字）</label><input id="add-title" type="text" autocomplete="off" maxlength="80"></div>' +
     '<fieldset><legend>類型</legend><div class="seg"><label><input type="radio" name="type" id="add-type-a" value="article" checked><span>文章</span></label><label><input type="radio" name="type" id="add-type-v" value="video"><span>影片</span></label></div></fieldset>' +
@@ -912,6 +1257,18 @@ function extractStatus(draft, message){
   if(canSaveWithoutTitle) title.placeholder = "留空會自動用文章標題";
   else title.removeAttribute("placeholder");
 }
+function setAutoSize(draft, size){
+  if(draft.manualSize || !size) return;
+  draft.form.querySelector("#add-size-" + size).checked = true;
+  draft.form.querySelector("#add-size-label").textContent = "篇幅 · 自動判斷";
+  draft.autoSize = true;
+}
+function clearAutoSize(draft){
+  if(!draft.autoSize) return;
+  draft.form.querySelector("#add-size-m").checked = true;
+  draft.form.querySelector("#add-size-label").textContent = "篇幅";
+  draft.autoSize = false;
+}
 function extractForUrl(draft, url){
   var account = sync;
   if(draft.url === url && draft.account === account) return;
@@ -923,11 +1280,7 @@ function extractForUrl(draft, url){
   var title = draft.form.querySelector("#add-title");
   if(title.value === draft.autoTitle) title.value = "";
   draft.autoTitle = undefined;
-  if(draft.autoSize){
-    draft.form.querySelector("#add-size-m").checked = true;
-    draft.form.querySelector("#add-size-label").textContent = "篇幅";
-    draft.autoSize = false;
-  }
+  clearAutoSize(draft);
   extractStatus(draft, account && url ? "正在抓正文…" : "");
   if(!account || !url) return;
   draft.timer = setTimeout(function(){
@@ -974,11 +1327,7 @@ async function runExtract(draft, url, sequence, account){
     draft.autoTitle = String(data.title || "").slice(0, 80);
     title.value = draft.autoTitle;
   }
-  if(!draft.manualSize && extractedSize){
-    draft.form.querySelector("#add-size-" + extractedSize).checked = true;
-    draft.form.querySelector("#add-size-label").textContent = "篇幅 · 自動判斷";
-    draft.autoSize = true;
-  }
+  setAutoSize(draft, extractedSize);
 }
 function deleteArticles(account){
   articleCache.delete(account);
@@ -1005,18 +1354,172 @@ function parseUrlField(){
   } else document.getElementById("add-plat").innerHTML = "&nbsp;";
   return m ? m[0] : null;
 }
-function submitAdd(){
-  var url = parseUrlField(), title = document.getElementById("add-title").value.trim(), err = document.getElementById("add-err");
-  if(!url){err.textContent = "沒有找到連結。請貼上以 http 開頭的網址。"; return;}
-  if(!title && !isExtracting(pendingAdd, url)){err.textContent = "請填一個標題。"; return;}
-  if(active().length >= slotCap(state.xp)){err.textContent = "收藏位已滿，先讀完一篇。"; return;}
+function cancelPdfCheck(draft){
+  draft.pdfCheck = null;
+  destroyPdf(draft.pdfTask);
+  draft.pdfTask = null;
+}
+function updatePdfPicker(draft){
+  var form = draft.form, uploading = pdfUploads.has(draft);
+  form.querySelector("#add-pdf").disabled = !sync || uploading;
+  form.querySelector("#add-pdf-login").hidden = Boolean(sync);
+  var clear = form.querySelector('[data-act="clear-pdf"]');
+  clear.hidden = !draft.pdfFile;
+  clear.disabled = uploading;
+}
+function updatePdfSelection(draft, file){
+  var form = draft.form, url = form.querySelector("#add-url");
+  var title = form.querySelector("#add-title"), video = form.querySelector("#add-type-v");
+  if(draft.pdfFile){
+    if(title.value === draft.autoTitle) title.value = "";
+    draft.autoTitle = undefined;
+    clearAutoSize(draft);
+  }
+  if(file){
+    extractForUrl(draft, null);
+    extractStatus(draft, "");
+    url.value = "";
+    form.querySelector("#add-plat").textContent = "識別為：PDF";
+    if(!draft.pdfFile) draft.wasVideo = video.checked;
+    form.querySelector("#add-type-a").checked = true;
+    if(!title.value.trim()){
+      draft.autoTitle = file.name.replace(/\.pdf$/i, "").slice(0, 80);
+      title.value = draft.autoTitle;
+    }
+  }else if(draft.pdfFile){
+    form.querySelector("#add-plat").innerHTML = "&nbsp;";
+    if(draft.wasVideo) video.checked = true;
+  }
+  url.disabled = video.disabled = Boolean(file);
+  if(Boolean(draft.pdfFile) !== Boolean(file)){
+    var labels = file ? ["短 · 8 頁內", "中 · 9–30 頁", "長 · 31 頁以上"]
+      : ["短 · 10 分鐘內", "中 · 10–30", "長 · 30 以上"];
+    form.querySelectorAll('input[name="size"] + span').forEach(function(label, i){label.textContent = labels[i];});
+  }
+  draft.pdfFile = file;
+  draft.pdfPages = null;
+  updatePdfPicker(draft);
+}
+async function selectPdf(draft, input){
+  if(!sync || pdfUploads.has(draft)) return;
+  var file = input.files[0], err = draft.form.querySelector("#add-err");
+  var button = draft.form.querySelector('[type="submit"]');
+  cancelPdfCheck(draft);
+  err.textContent = "";
+  button.disabled = false;
+  if(file && !/\.pdf$/i.test(file.name) && file.type !== "application/pdf") err.textContent = "請選擇 PDF 檔案。";
+  else if(file && file.size > 50 * 1024 * 1024) err.textContent = "PDF 不能超過 50 MB。";
+  if(err.textContent){
+    input.value = "";
+    file = null;
+  }
+  updatePdfSelection(draft, file);
+  if(!file) return;
+  var check = {}, account = sync;
+  draft.pdfCheck = check;
+  button.disabled = true;
+  function current(){return pendingAdd === draft && draft.pdfCheck === check && sync === account;}
+  try{
+    var results = await Promise.all([loadPdfJs(), file.arrayBuffer()]);
+    if(!current()) return;
+    draft.pdfTask = openPdf(results[0], results[1]);
+    var pdf = await draft.pdfTask.promise;
+    if(!current()) return;
+    if(!pdf.numPages) throw new Error("PDF has no pages");
+    draft.pdfPages = pdf.numPages;
+    setAutoSize(draft, pdf.numPages <= 8 ? "s" : pdf.numPages <= 30 ? "m" : "l");
+  }catch(error){
+    if(!current()) return;
+    err.textContent = "這個 PDF 打不開";
+    input.value = "";
+    updatePdfSelection(draft, null);
+  }finally{
+    if(current()){
+      cancelPdfCheck(draft);
+      button.disabled = false;
+    }
+  }
+}
+function addSlotFull(){
+  var used = active().length;
+  pdfUploads.forEach(function(request, draft){
+    if(draft.uploadAccount === sync && draft.uploadCleanup === pdfCleanups.get(sync)) used++;
+  });
+  return used >= slotCap(state.xp);
+}
+function addItem(draft, fields){
   var now = Date.now();
-  var item = {id:pendingAdd.pendingId, url:url, title:title || fallbackTitle(url), type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active", pos:0, posAt:0};
-  if(!title) item.autoTitle = true;
-  if(pendingAdd.manualSize) item.manualSize = true;
-  if(pendingAdd.article) item.article = pendingAdd.article;
+  var item = Object.assign({
+    id:draft.pendingId, size:draft.form.querySelector("input[name=size]:checked").value,
+    savedAt:now, expiresAt:now + LIFE*DAY, status:"active", pos:0, posAt:0
+  }, fields);
+  if(draft.manualSize) item.manualSize = true;
+  return item;
+}
+function saveAddedItem(draft, item){
   state.items.push(item);
-  closeSheet(); commit(); toast("已存入，" + LIFE + " 天後枯萎");
+  if(pendingAdd === draft) closeSheet();
+  commit();
+  toast("已存入，" + LIFE + " 天後枯萎");
+}
+async function submitPdf(draft, title, err){
+  if(!sync || !draft.pdfPages || pdfUploads.has(draft)) return;
+  if(!title){err.textContent = "請填一個標題。"; return;}
+  if(addSlotFull()){err.textContent = "收藏位已滿，先讀完一篇。"; return;}
+  var account = sync, cleanup = pdfCleanups.get(account), file = draft.pdfFile;
+  var path = pdfPath(account, draft.pendingId);
+  var item = addItem(draft, {url:"", title:title, type:"article", platform:"PDF", article:"ok",
+    pdf:{path:path, name:file.name, bytes:file.size, pages:draft.pdfPages}});
+  var button = draft.form.querySelector('[type="submit"]');
+  var label = button.textContent;
+  err.textContent = "";
+  button.disabled = true;
+  button.textContent = "上傳中…";
+  draft.uploadAccount = account;
+  draft.uploadCleanup = cleanup;
+  var request = Promise.resolve(cleanup).then(function(){
+    if(sync !== account || pdfCleanups.get(account) !== cleanup) return null;
+    if(active().length >= slotCap(state.xp)) return {full:true};
+    // Supabase 會以 Blob 的 MIME 型別建立 multipart 檔案欄位。
+    var body = file.type === "application/pdf" ? file : file.slice(0, file.size, "application/pdf");
+    return pdfStorage().upload(path, body, {contentType:"application/pdf", upsert:true});
+  });
+  pdfUploads.set(draft, request);
+  updatePdfPicker(draft);
+  try{
+    var result = await request;
+    if(sync !== account || pdfCleanups.get(account) !== cleanup) return;
+    if(result && result.full){
+      if(pendingAdd === draft) err.textContent = "收藏位已滿，先讀完一篇。";
+      return;
+    }
+    if(!result || result.error) throw new Error("upload");
+    item.savedAt = Date.now();
+    item.expiresAt = item.savedAt + LIFE*DAY;
+    saveAddedItem(draft, item);
+  }catch(error){
+    if(pendingAdd === draft && sync === account) err.textContent = "上傳失敗，請再試一次";
+  }finally{
+    pdfUploads.delete(draft);
+    if(pendingAdd === draft){
+      updatePdfPicker(draft);
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
+}
+function submitAdd(){
+  var draft = pendingAdd, err = document.getElementById("add-err");
+  if(draft.pdfFile){submitPdf(draft, document.getElementById("add-title").value.trim(), err); return;}
+  var url = parseUrlField(), title = document.getElementById("add-title").value.trim();
+  if(!url){err.textContent = "沒有找到連結。請貼上以 http 開頭的網址。"; return;}
+  if(!title && !isExtracting(draft, url)){err.textContent = "請填一個標題。"; return;}
+  if(addSlotFull()){err.textContent = "收藏位已滿，先讀完一篇。"; return;}
+  var item = addItem(draft, {url:url, title:title || fallbackTitle(url),
+    type:draft.form.querySelector("input[name=type]:checked").value, platform:platform(url)});
+  if(!title) item.autoTitle = true;
+  if(draft.article) item.article = draft.article;
+  saveAddedItem(draft, item);
 }
 function sheetRead(it){
   openSheet('<h3>讀完了</h3><p class="lead">' + esc(it.title) + '</p><form id="f-read" data-id="' + it.id + '" novalidate>' +
@@ -1028,6 +1531,7 @@ function submitRead(id){
   var it = find(id), note = document.getElementById("read-note").value.trim();
   if(!it || it.status !== "active"){closeSheet(); return;}
   if(note.length < MIN_NOTE){document.getElementById("read-err").textContent = "還差 " + (MIN_NOTE - note.length) + " 個字。"; return;}
+  if(it.pdf && readerPage && readerPage.id === id) saveReaderProgress();
   var now = Date.now(), before = level(state.xp), wk = weekIdx(now);
   it.status = "read"; it.endedAt = now; it.takeaway = note;
   state.xp += XP[it.size];
@@ -1064,7 +1568,12 @@ document.addEventListener("click", function(e){
   if(e.target === sheetEl){closeSheet(); return;}
   var el = e.target.closest("[data-act]"); if(!el) return;
   var act = el.getAttribute("data-act"), id = el.getAttribute("data-id"), it = id ? find(id) : null;
-  if(act === "open-add"){ if(active().length >= slotCap(state.xp)) toast("收藏位已滿，先讀完一篇才能再存"); else sheetAdd(); }
+  if(act === "open-add"){ if(addSlotFull()) toast("收藏位已滿，先讀完一篇才能再存"); else sheetAdd(); }
+  else if(act === "clear-pdf" && pendingAdd){
+    var input = pendingAdd.form.querySelector("#add-pdf");
+    input.value = "";
+    selectPdf(pendingAdd, input);
+  }
   else if(act === "open-reader" && it){
     if(e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
@@ -1076,7 +1585,7 @@ document.addEventListener("click", function(e){
     sheetRead(it);
   }
   else if(act === "open-drop" && it) sheetDrop(it);
-  else if(act === "confirm-drop" && it && it.status === "active"){ it.status = "dropped"; it.endedAt = Date.now(); closeSheet(); commit(); toast("已送進墓地"); }
+  else if(act === "confirm-drop" && it && it.status === "active"){ it.status = "dropped"; it.endedAt = Date.now(); deletePdf(it); closeSheet(); commit(); toast("已送進墓地"); }
   else if(act === "close") closeSheet();
   else if(act === "start"){ demo = false; state = fresh(); commit(); location.hash = "shelf"; toast("示例已清空，存入你的第一篇吧"); }
   else if(act === "open-signout") sheetSignOut();
@@ -1084,8 +1593,9 @@ document.addEventListener("click", function(e){
   else if(act === "open-import") sheetImport();
   else if(act === "open-reset") sheetReset();
   else if(act === "confirm-reset"){
+    bootExpiredPdfs = null;
     demo = false; state = fresh(); closeSheet(); commit(true); toast("已清空");
-    if(sync) deleteArticles(sync);
+    if(sync){deleteArticles(sync); deleteAllPdfs(sync);}
   }
   else if(act === "copy-backup"){
     var text = JSON.stringify(state);
@@ -1096,6 +1606,8 @@ document.addEventListener("click", function(e){
     try{
       var o = JSON.parse(document.getElementById("imp-text").value);
       if(!o || !Array.isArray(o.items) || typeof o.xp !== "number") throw new Error("shape");
+      bootExpiredPdfs = null;
+      bootExpiredPdfs = null;
       o.started = true; state = o; demo = false; settle(); closeSheet(); commit(true); toast("已還原");
     }catch(err){ errEl.textContent = "這段文字不是有效的備份。請確認完整貼上。"; }
   }
@@ -1111,7 +1623,9 @@ document.addEventListener("input", function(e){
   else if(e.target.id === "add-title" && pendingAdd) pendingAdd.autoTitle = undefined;
 });
 document.addEventListener("change", function(e){
-  if(pendingAdd && e.target.form === pendingAdd.form && e.target.name === "size"){
+  if(!pendingAdd || e.target.form !== pendingAdd.form) return;
+  if(e.target.id === "add-pdf") selectPdf(pendingAdd, e.target);
+  else if(e.target.name === "size"){
     pendingAdd.manualSize = true;
     pendingAdd.autoSize = false;
     pendingAdd.form.querySelector("#add-size-label").textContent = "篇幅";
@@ -1137,7 +1651,15 @@ window.addEventListener("offline", renderHead);
 /* ---------- boot ---------- */
 (function(){
   var cache = readLocal();
-  if(cache && cache.started && Array.isArray(cache.items)){ state = cache; settle(); }
+  if(cache && cache.started && Array.isArray(cache.items)){
+    state = cache;
+    var account = readSync();
+    settle(function(it){
+      if(!account || !it.pdf) return;
+      if(!bootExpiredPdfs) bootExpiredPdfs = {userId:account.userId, ids:[]};
+      bootExpiredPdfs.ids.push(it.id);
+    });
+  }
   else { state = demoState(); demo = true; }
   initSupabase();
   render();
