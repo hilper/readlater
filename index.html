@@ -289,7 +289,9 @@ function merge(base, local, remote){
   var items = new Map(localItems), xp = remote.xp;
   remoteItems.forEach(function(item, id){
     var mine = localItems.get(id);
-    if(!mine || mine.status === "active" || item.status !== "active") items.set(id, item);
+    if(mine && mine.status === "active" && item.status === "active" && (mine.posAt || 0) > (item.posAt || 0)){
+      items.set(id, Object.assign({}, item, {pos:mine.pos, posAt:mine.posAt}));
+    }else if(!mine || mine.status === "active" || item.status !== "active") items.set(id, item);
   });
   localItems.forEach(function(item, id){
     var other = remoteItems.get(id);
@@ -560,13 +562,14 @@ function viewShelf(){
   if(!list.length) h += '<p class="lead">書架是空的。在別的應用裡複製連結，回來點「存入」。</p>';
   list.forEach(function(it){
     var n = daysLeft(it, now), st = stage(n), pct = Math.max(2, Math.min(100, (it.expiresAt - now)/(LIFE*DAY)*100));
+    var readLabel = it.pos > 0.02 ? "繼續 · " + Math.min(99, Math.round(it.pos * 100)) + "%" : "閱讀";
     h += '<article class="card ' + (st === "fresh" ? "" : st) + '">' +
       '<div class="left"><b>' + n + '</b><span>天 · ' + stageName(st) + '</span></div>' +
       '<div><div class="title">' + esc(it.title) + '</div>' +
       '<div class="meta"><span>' + esc(it.platform) + ' · ' + TYPE[it.type] + ' · ' + SIZE[it.size] + '篇</span><span>讀完 +' + XP[it.size] + ' 分</span></div></div>' +
       '<div class="life" aria-hidden="true"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
       '<div class="acts">' + (it.article === "ok"
-        ? '<button class="btn" type="button" data-act="open-reader" data-id="' + esc(it.id) + '">閱讀</button>'
+        ? '<button class="btn" type="button" data-act="open-reader" data-id="' + esc(it.id) + '">' + readLabel + '</button>'
         : '<a class="btn" href="' + esc(safeUrl(it.url)) + '" target="_blank" rel="noopener noreferrer">去閱讀</a>') +
       '<button class="btn primary" type="button" data-act="open-read" data-id="' + it.id + '">讀完了</button>' +
       '<button class="btn ghost" type="button" data-act="open-drop" data-id="' + it.id + '">放棄</button></div></article>';
@@ -646,12 +649,99 @@ function openReader(it){
   render();
 }
 function closeReader(){
+  saveReaderProgress();
   var from = history.state && history.state.readerFrom;
   if(TABS.some(function(t){return t[0] === from;})) history.back();
   else{
     history.replaceState(null, "", "#shelf");
     render();
   }
+}
+function saveReaderProgress(){
+  var page = readerPage;
+  if(!page || page.account !== sync) return false;
+  if(page.captureScroll) page.captureScroll();
+  if(!page.progressTimer) return false;
+  clearTimeout(page.progressTimer);
+  page.progressTimer = null;
+  var it = find(page.id);
+  if(!it || it.status !== "active") return false;
+  var pos = Math.round(page.readPosition() * 10000);
+  if(Math.abs(pos - Math.round((it.pos || 0) * 10000)) < 50) return false;
+  it.pos = pos / 10000;
+  it.posAt = Date.now();
+  commit();
+  return true;
+}
+function watchReaderFrame(page, frame, position){
+  var doc, win, lastY, readyCheck, loaded = false, userScrolled = false;
+  function current(){return readerPage === page && page.frame === frame;}
+  function scrollRange(){return Math.max(0, doc.scrollingElement.scrollHeight - win.innerHeight);}
+  function scrollY(range){return Math.min(range, Math.max(0, win.scrollY));}
+  page.readPosition = function(forTheme){
+    if(!win) return position;
+    var range = scrollRange();
+    if(!loaded && !userScrolled && (!forTheme || !range)) return position;
+    return range ? scrollY(range) / range : 0;
+  };
+  function restore(){
+    var range = scrollRange();
+    win.scrollTo(0, position * range);
+    // 捲動事件稍後才送達，先記下還原後的實際位置。
+    lastY = scrollY(range);
+  }
+  page.restorePosition = function(pos){
+    position = pos;
+    if(win) restore();
+  };
+  function onScroll(){
+    if(!current() || !win || page.account !== sync) return;
+    var range = scrollRange(), y = scrollY(range);
+    if(y === Math.min(lastY, range)) return;
+    lastY = y;
+    userScrolled = page.userScrolled = true;
+    doc.documentElement.style.removeProperty("overflow-anchor");
+    var it = find(page.id);
+    if(!it || it.status !== "active") return;
+    clearTimeout(page.progressTimer);
+    page.progressTimer = setTimeout(saveReaderProgress, 1500);
+  }
+  page.captureScroll = onScroll;
+  function onReady(){
+    if(!current() || win) return;
+    win = frame.contentWindow;
+    // 保留圖片載入前的還原基準，直到使用者捲動或整頁載入。
+    doc.documentElement.style.setProperty("overflow-anchor", "none");
+    restore();
+    win.addEventListener("scroll", onScroll);
+  }
+  function checkDocument(){
+    if(!current()) return;
+    // iframe 先有一份 about:blank，等 srcdoc 的文件才能監聽 DOMContentLoaded。
+    var loadedDoc = frame.contentDocument;
+    if(!loadedDoc || loadedDoc.URL !== "about:srcdoc"){
+      readyCheck = requestAnimationFrame(checkDocument);
+      return;
+    }
+    doc = loadedDoc;
+    if(doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", onReady, {once:true});
+    else onReady();
+  }
+  frame.addEventListener("load", function(){
+    if(!current()) return;
+    var loadedDoc = frame.contentDocument;
+    if(!loadedDoc || loadedDoc.URL !== "about:srcdoc" || loaded) return;
+    cancelAnimationFrame(readyCheck);
+    doc = loadedDoc;
+    loaded = true;
+    if(!win) onReady();
+    else{
+      onScroll();
+      if(!userScrolled) restore();
+    }
+    doc.documentElement.style.removeProperty("overflow-anchor");
+  });
+  readyCheck = requestAnimationFrame(checkDocument);
 }
 function readerDocument(it, article, theme){
   return '<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
@@ -699,6 +789,7 @@ async function loadArticle(page){
 }
 function renderReader(it){
   if(!readerPage || readerPage.hash !== location.hash || readerPage.account !== sync || readerPage.id !== (it && it.id)){
+    if(readerPage) clearTimeout(readerPage.progressTimer);
     readerPage = {hash:location.hash, account:sync, id:it && it.id};
     readerEl.innerHTML = '<div class="reader-bar reader-top"><button class="btn" type="button" data-act="close-reader">← 返回</button>' +
       '<span class="reader-site"></span></div><p class="reader-status" role="status">載入中…</p>' +
@@ -724,14 +815,25 @@ function renderReader(it){
   var theme = ["--bg", "--ink", "--muted", "--line", "--serif", "color-scheme"].map(function(name){
     return name + ":" + style.getPropertyValue(name);
   }).join(";");
+  var pos = Math.max(0, Math.min(1, it.pos || 0));
+  if(readerPage.restorePosition && !readerPage.userScrolled && readerPage.savedPos !== pos){
+    readerPage.captureScroll();
+    if(!readerPage.userScrolled) readerPage.restorePosition(pos);
+  }
+  readerPage.savedPos = pos;
   if(readerPage.theme === theme) return;
   readerPage.theme = theme;
-  var previous = status || readerEl.querySelector("iframe");
+  var previous = status || readerPage.frame;
+  if(readerPage.captureScroll) readerPage.captureScroll();
+  var position = readerPage.readPosition ? readerPage.readPosition(true) : pos;
   var frame = document.createElement("iframe");
   frame.className = "reader-frame";
   frame.title = "文章正文";
-  frame.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+  // 允許上層讀取捲動位置。加入 allow-scripts 會讓同源正文能解除沙箱。
+  frame.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
   frame.srcdoc = readerDocument(it, article, theme);
+  readerPage.frame = frame;
+  watchReaderFrame(readerPage, frame, position);
   previous.replaceWith(frame);
 }
 function render(){
@@ -753,6 +855,7 @@ function render(){
     t = "shelf";
   }
   if(readerPage){
+    clearTimeout(readerPage.progressTimer);
     readerPage = null;
     readerEl.hidden = true;
     readerEl.replaceChildren();
@@ -908,7 +1011,7 @@ function submitAdd(){
   if(!title && !isExtracting(pendingAdd, url)){err.textContent = "請填一個標題。"; return;}
   if(active().length >= slotCap(state.xp)){err.textContent = "收藏位已滿，先讀完一篇。"; return;}
   var now = Date.now();
-  var item = {id:pendingAdd.pendingId, url:url, title:title || fallbackTitle(url), type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active"};
+  var item = {id:pendingAdd.pendingId, url:url, title:title || fallbackTitle(url), type:sheetEl.querySelector("input[name=type]:checked").value, size:sheetEl.querySelector("input[name=size]:checked").value, platform:platform(url), savedAt:now, expiresAt:now + LIFE*DAY, status:"active", pos:0, posAt:0};
   if(!title) item.autoTitle = true;
   if(pendingAdd.manualSize) item.manualSize = true;
   if(pendingAdd.article) item.article = pendingAdd.article;
@@ -968,7 +1071,10 @@ document.addEventListener("click", function(e){
     openReader(it);
   }
   else if(act === "close-reader") closeReader();
-  else if(act === "open-read" && it) sheetRead(it);
+  else if(act === "open-read" && it){
+    if(tab() === "reader") saveReaderProgress();
+    sheetRead(it);
+  }
   else if(act === "open-drop" && it) sheetDrop(it);
   else if(act === "confirm-drop" && it && it.status === "active"){ it.status = "dropped"; it.endedAt = Date.now(); closeSheet(); commit(); toast("已送進墓地"); }
   else if(act === "close") closeSheet();
@@ -1012,11 +1118,18 @@ document.addEventListener("change", function(e){
   }
 });
 document.addEventListener("keydown", function(e){ if(e.key === "Escape" && !sheetEl.hidden) closeSheet(); });
-window.addEventListener("hashchange", render);
+window.addEventListener("hashchange", function(){
+  if(readerPage && readerPage.hash !== location.hash && saveReaderProgress()) return;
+  render();
+});
 function updateReaderTheme(){if(tab() === "reader") render();}
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateReaderTheme);
 new MutationObserver(updateReaderTheme).observe(document.documentElement, {attributes:true, attributeFilter:["data-theme"]});
-document.addEventListener("visibilitychange", function(){if(!document.hidden) refreshSync();});
+document.addEventListener("visibilitychange", function(){
+  if(document.hidden) saveReaderProgress();
+  else refreshSync();
+});
+window.addEventListener("pagehide", saveReaderProgress);
 window.addEventListener("focus", function(){if(sync) refreshSync();});
 window.addEventListener("online", function(){if(sync) refreshSync();});
 window.addEventListener("offline", renderHead);
