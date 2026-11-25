@@ -954,12 +954,14 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
   container.appendChild(pages);
   var slots = [], nearby = new Set(), rendered = new Set(), drawing = new Set();
   var zooms = [1, 1.5, 2, 3], zoom = 0, width = 0, height = 0, observer, refreshFrame;
+  var visualViewport = window.visualViewport, viewportResizeTimer;
+  var maxCanvasPixels = 8000000, maxCanvasSide = 8192;
   for(var i = 1; i <= pdfDocument.numPages; i++){
     var element = document.createElement("div");
     element.className = "pdf-page";
     element.dataset.page = i;
     pages.appendChild(element);
-    slots.push({number:i, element:element, ratio:defaultRatio});
+    slots.push({number:i, element:element, ratio:defaultRatio, pixelRatio:0});
   }
   status.replaceWith(container);
   var scroll = watchReaderScroll(page, page.savedPos, {
@@ -1014,8 +1016,9 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
     rendered.delete(slot);
     slot.element.replaceChildren();
     if(slot.canvas) slot.canvas.width = slot.canvas.height = 0;
-    if(slot.pdfPage) slot.pdfPage.cleanup();
+    if(slot.pdfPage && !drawing.has(slot)) slot.pdfPage.cleanup();
     slot.canvas = slot.pdfPage = null;
+    slot.pixelRatio = slot.failedTargetRatio = 0;
   }
   function cancel(slot){
     slot.cancelled = true;
@@ -1033,27 +1036,53 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
   function schedule(){
     if(!refreshFrame) refreshFrame = requestAnimationFrame(refresh);
   }
+  function basePixelRatio(){return Math.min(window.devicePixelRatio || 1, 3);}
+  function targetPixelRatio(){
+    var pinchScale = visualViewport ? Math.max(1, Math.min(visualViewport.scale, 4)) : 1;
+    return basePixelRatio() * pinchScale;
+  }
+  function cappedPixelRatio(ratio, target){
+    var pageHeight = width * ratio;
+    return Math.min(target, Math.sqrt(maxCanvasPixels / (width * pageHeight)),
+      maxCanvasSide / width, maxCanvasSide / pageHeight);
+  }
+  function onViewportResize(){
+    clearTimeout(viewportResizeTimer);
+    viewportResizeTimer = setTimeout(function(){
+      viewportResizeTimer = null;
+      schedule();
+    }, 300);
+  }
   function refresh(){
     refreshFrame = null;
     if(!currentPdfReader(page)) return;
     var first = pageAt(container.scrollTop), last = pageAt(container.scrollTop + height);
+    var pinchRatio = targetPixelRatio(), baseRatio = basePixelRatio();
     function distance(slot){return Math.max(first - slot.number, slot.number - last, 0);}
+    // 捏合放大時只有畫面上的頁面畫高清，其餘維持一般解析度，避免 iPhone 記憶體不足。
+    function want(slot){return distance(slot) === 0 ? pinchRatio : baseRatio;}
     function outside(slot){return distance(slot) > 5 || (zoom > 0 && !nearby.has(slot));}
     rendered.forEach(function(slot){if(outside(slot)) release(slot);});
-    drawing.forEach(function(slot){if(outside(slot)) cancel(slot);});
+    drawing.forEach(function(slot){if(outside(slot) || (slot.canvas && !nearby.has(slot))) cancel(slot);});
     Array.from(nearby).sort(function(a,b){return distance(a) - distance(b);}).some(function(slot){
       if(drawing.size >= 2) return true;
-      if(distance(slot) <= 5 && !rendered.has(slot) && !drawing.has(slot)) draw(slot);
+      if(distance(slot) > 5 || drawing.has(slot)) return false;
+      var targetRatio = want(slot);
+      if(!rendered.has(slot)) draw(slot, targetRatio);
+      else if(slot.canvas && !viewportResizeTimer && slot.failedTargetRatio !== targetRatio &&
+          Math.abs(cappedPixelRatio(slot.ratio, targetRatio) - slot.pixelRatio) > slot.pixelRatio * 0.15){
+        draw(slot, targetRatio);
+      }
       return false;
     });
   }
-  async function draw(slot){
+  async function draw(slot, target){
     drawing.add(slot);
     slot.cancelled = false;
-    var pdfPage, canvas;
+    var pdfPage = slot.pdfPage, canvas;
     function current(){return !slot.cancelled && currentPdfReader(page);}
     try{
-      pdfPage = await pdfDocument.getPage(slot.number);
+      if(!pdfPage) pdfPage = await pdfDocument.getPage(slot.number);
       if(!current()) return;
       var natural = pdfPage.getViewport({scale:1}), ratio = natural.height / natural.width;
       if(ratio !== slot.ratio){
@@ -1065,21 +1094,30 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
         if(!page.userScrolled) scroll.restore();
         else scroll.move(y + (above ? el.offsetHeight - oldHeight : 0));
       }
-      var pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      var pixelRatio = cappedPixelRatio(ratio, target);
       var viewport = pdfPage.getViewport({scale:width * pixelRatio / natural.width});
       canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.ceil(viewport.width));
-      canvas.height = Math.max(1, Math.ceil(viewport.height));
+      // 無條件捨去，避免像素尺寸進位後超出面積上限。
+      canvas.width = Math.max(1, Math.floor(width * pixelRatio));
+      canvas.height = Math.max(1, Math.floor(width * ratio * pixelRatio));
       canvas.setAttribute("aria-label", "第 " + slot.number + " 頁");
       slot.task = pdfPage.render({canvasContext:canvas.getContext("2d"), viewport:viewport});
       await slot.task.promise;
       if(!current()) return;
+      var previousCanvas = slot.canvas;
       slot.element.replaceChildren(canvas);
+      if(previousCanvas) previousCanvas.width = previousCanvas.height = 0;
       slot.canvas = canvas;
       slot.pdfPage = pdfPage;
+      slot.pixelRatio = pixelRatio;
+      slot.failedTargetRatio = 0;
       rendered.add(slot);
     }catch(error){
       if(current()){
+        if(slot.canvas){
+          slot.failedTargetRatio = target;
+          return;
+        }
         var message = document.createElement("p");
         message.className = "reader-status pdf-page-error";
         message.textContent = "PDF 暫時讀不到";
@@ -1096,6 +1134,7 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
   }
   function onScroll(){page.captureScroll(); schedule();}
   container.addEventListener("scroll", onScroll, {passive:true});
+  if(visualViewport) visualViewport.addEventListener("resize", onViewportResize);
   zoomOut.addEventListener("click", function(){if(zoom > 0){zoom--; layout();}});
   zoomIn.addEventListener("click", function(){if(zoom < zooms.length - 1){zoom++; layout();}});
   layout();
@@ -1105,6 +1144,8 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
     resize.disconnect();
     observer.disconnect();
     container.removeEventListener("scroll", onScroll);
+    if(visualViewport) visualViewport.removeEventListener("resize", onViewportResize);
+    clearTimeout(viewportResizeTimer);
     cancelAnimationFrame(refreshFrame);
     drawing.forEach(cancel);
     rendered.forEach(release);
