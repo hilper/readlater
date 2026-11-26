@@ -140,6 +140,43 @@ fieldset{border:0;margin:0;padding:0}
 .pdf-page{flex:none;width:100%;overflow:hidden;background:#fff;outline:1px solid var(--line)}
 .pdf-page canvas{display:block;width:100%;height:100%}
 .pdf-page-error{color:#444}
+.companion-layer{position:absolute;inset:var(--companion-top) 0 var(--companion-bottom);overflow:hidden;pointer-events:none}
+.companion-ask{position:absolute;right:calc(14px + env(safe-area-inset-right));bottom:12px;min-width:48px;min-height:48px;pointer-events:auto}
+.companion-ask[hidden]{display:none}
+.companion-shade{position:absolute;inset:0;background:var(--bg);opacity:0;pointer-events:none}
+.companion-layer.open .companion-shade{opacity:.45}
+.companion-panel{position:absolute;inset:auto 0 0;height:min(62vh,100%);display:flex;flex-direction:column;background:var(--bg);border-top:1px solid var(--ink);padding:0 max(14px,env(safe-area-inset-right)) 8px max(14px,env(safe-area-inset-left));transform:translateY(100%);transition:transform .22s;visibility:hidden}
+.companion-layer.open .companion-panel{transform:translateY(0);pointer-events:auto;visibility:visible}
+.companion-panel[inert]{transition:transform .22s,visibility 0s .22s}
+.companion-handle{display:grid;place-items:center;height:18px;flex:none;touch-action:none;cursor:grab}
+.companion-handle::after{content:"";width:32px;height:3px;background:var(--muted)}
+.companion-head,.companion-form{display:flex;align-items:center;gap:8px}
+.companion-head{justify-content:space-between;border-bottom:1px solid var(--line)}
+.companion-focus{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.companion-close{flex:none;border:0;background:transparent;padding:0;width:44px;min-height:44px;font-size:24px}
+.companion-chat{min-height:0;flex:1;overflow-y:auto;overscroll-behavior:contain;overflow-anchor:none;padding:10px 2px}
+.companion-chat p,.companion-chat ul{margin:0 0 6px}
+.companion-chat ul{padding-inline-start:22px}
+.companion-turn{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.companion-question{align-self:flex-end;border:1px solid var(--line);padding:4px 9px;max-width:90%;white-space:pre-wrap;overflow-wrap:anywhere}
+.companion-answer,.companion-review{overflow-wrap:anywhere}
+.companion-quote{text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.companion-retry{min-height:30px;color:var(--red);border-color:currentColor;margin-inline-start:8px}
+.companion-shortcuts{display:flex;gap:6px;overflow-x:auto;padding:4px}
+.companion-shortcuts .btn{min-height:36px;padding:4px 9px}
+.companion-shortcuts .btn[hidden]{display:none}
+.companion-options{display:flex;align-items:center;gap:6px;min-height:28px;width:fit-content}
+.companion-form{align-items:flex-end}
+.companion-form textarea{flex:1;min-width:0;min-height:44px;line-height:22px;max-height:110px;resize:none;padding:10px 8px;border:1px solid var(--line)}
+.companion-review summary{cursor:pointer}
+.companion-review p{margin:4px 0}
+.pdf-page.companion-mark{outline:3px solid var(--red);outline-offset:-3px}
+@media (min-width:900px){
+  .companion-panel{inset:0 0 0 auto;width:380px;height:auto;border-top:0;border-left:1px solid var(--ink)}
+}
+@media (prefers-reduced-motion:reduce){
+  .companion-panel,.companion-panel[inert]{transition:none}
+}
 </style>
 </head>
 <body>
@@ -291,7 +328,7 @@ function settle(onExpire){
 }
 /* ---------- PDF storage and loading ---------- */
 var PDF_BUCKET = "readlater-pdfs", PDF_VENDOR = "vendor/pdfjs-3.11.174/";
-var pdfScript, bootExpiredPdfs, pdfUploads = new Map(), pdfCleanups = new WeakMap();
+var pdfScript, bootExpiredItems, pdfUploads = new Map(), pdfCleanups = new WeakMap();
 function loadPdfJs(){
   if(!pdfScript){
     pdfScript = new Promise(function(resolve, reject){
@@ -322,6 +359,10 @@ function pdfPath(account, id){return account.user.id + "/" + id + ".pdf";}
 async function deletePdf(it){
   if(!sync || !it.pdf || it.pdf.path !== pdfPath(sync, it.id) || String(it.id).includes("/")) return;
   try{await pdfStorage().remove([it.pdf.path]);}catch(error){}
+}
+function deleteReaderData(it){
+  deletePdf(it);
+  if(sync) deleteChats(sync, it.id);
 }
 function deleteAllPdfs(account){
   var outstanding = Array.from(pdfUploads).filter(function(entry){return entry[0].uploadAccount === account;})
@@ -436,16 +477,16 @@ function applyRemote(current, remote){
   current.baseVersion = version;
   current.initial = false;
   demo = false;
-  if(bootExpiredPdfs){
-    if(bootExpiredPdfs.userId === current.user.id){
-      bootExpiredPdfs.ids.forEach(function(id){
+  if(bootExpiredItems){
+    if(bootExpiredItems.userId === current.user.id){
+      bootExpiredItems.ids.forEach(function(id){
         var it = find(id);
-        if(it && it.status === "expired") deletePdf(it);
+        if(it && it.status === "expired") deleteReaderData(it);
       });
     }
-    bootExpiredPdfs = null;
+    bootExpiredItems = null;
   }
-  if(settle(deletePdf)){
+  if(settle(deleteReaderData)){
     state.updatedAt = Date.now();
     current.pending = true;
     changed = true;
@@ -503,7 +544,7 @@ function refreshSync(){
 }
 function clearAccountData(){
   sync = null;
-  bootExpiredPdfs = null;
+  bootExpiredItems = null;
   try{
     localStorage.removeItem(LS_KEY);
     localStorage.removeItem(SYNC_KEY);
@@ -728,7 +769,10 @@ function viewMe(){
     ["啃完長文", "讀完一篇長篇", reads.some(function(i){return i.size === "l";})],
     ["連勝四週", "連續 4 週都有讀完", state.bestStreak >= 4]
   ];
-  var h = viewAccount() + demoBanner() + '<section class="panel"><span class="lead">近四週讀完率（讀完 ÷ 存入）</span><div class="big">' + rate + '<small>讀完 ' + read + ' · 存入 ' + saved + '</small></div>' +
+  var h = viewAccount() + demoBanner();
+  if(sync) h += '<section class="panel"><h2>AI 伴讀</h2><div id="companion-usage">—</div>' +
+    '<p class="hint">按 DeepSeek 尖峰價估算，實際以 DeepSeek 帳單為準。</p></section>';
+  h += '<section class="panel"><span class="lead">近四週讀完率（讀完 ÷ 存入）</span><div class="big">' + rate + '<small>讀完 ' + read + ' · 存入 ' + saved + '</small></div>' +
     '<div class="tablewrap"><table><thead><tr><th>週（起始日）</th><th>存入</th><th>讀完</th><th>過期</th><th>放棄</th></tr></thead><tbody>';
   rows.forEach(function(r, i){h += '<tr><td>' + weekStart(r.w) + (i === 0 ? "（本週）" : "") + '</td><td>' + r.saved + '</td><td>' + r.read + '</td><td>' + r.expired + '</td><td>' + r.dropped + '</td></tr>';});
   h += '</tbody></table></div></section>';
@@ -827,6 +871,7 @@ function watchReaderScroll(page, position, scroll){
     if(y === Math.min(lastY, range)) return;
     lastY = y;
     userScrolled = page.userScrolled = true;
+    if(page.companion) updateCompanionProgress(page);
     if(scroll.onUserScroll) scroll.onUserScroll();
     var it = find(page.id);
     if(!it || it.status !== "active") return;
@@ -840,6 +885,12 @@ function watchReaderScroll(page, position, scroll){
 }
 function watchReaderFrame(page, frame, position){
   var doc, win, readyCheck, loaded = false;
+  var listeners = new AbortController();
+  var signal = listeners.signal;
+  page.disposeFrame = function(){
+    cancelAnimationFrame(readyCheck);
+    listeners.abort();
+  };
   function current(){return readerPage === page && page.frame === frame;}
   function enableAnchor(){doc.documentElement.style.removeProperty("overflow-anchor");}
   var scroll = watchReaderScroll(page, position, {
@@ -858,7 +909,8 @@ function watchReaderFrame(page, frame, position){
     // 保留圖片載入前的還原基準，直到使用者捲動或整頁載入。
     doc.documentElement.style.setProperty("overflow-anchor", "none");
     scroll.restore();
-    win.addEventListener("scroll", onScroll);
+    win.addEventListener("scroll", onScroll, {signal:signal});
+    attachArticleCompanion(page, doc, signal);
   }
   function checkDocument(){
     if(!current()) return;
@@ -869,7 +921,7 @@ function watchReaderFrame(page, frame, position){
       return;
     }
     doc = loadedDoc;
-    if(doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", onReady, {once:true});
+    if(doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", onReady, {once:true, signal:signal});
     else onReady();
   }
   frame.addEventListener("load", function(){
@@ -885,14 +937,17 @@ function watchReaderFrame(page, frame, position){
       if(!scroll.userScrolled()) scroll.restore();
     }
     enableAnchor();
-  });
+  }, {signal:signal});
   readyCheck = requestAnimationFrame(checkDocument);
 }
 function updateReaderPosition(page, it){
   var pos = Math.max(0, Math.min(1, it.pos || 0));
   if(page.restorePosition && !page.userScrolled && page.savedPos !== pos){
     page.captureScroll();
-    if(!page.userScrolled) page.restorePosition(pos);
+    if(!page.userScrolled){
+      page.restorePosition(pos);
+      if(page.companion) updateCompanionProgress(page);
+    }
   }
   page.savedPos = pos;
   return pos;
@@ -901,6 +956,8 @@ function disposeReaderPage(){
   if(!readerPage) return;
   var page = readerPage;
   readerPage = null;
+  if(page.disposeFrame) page.disposeFrame();
+  if(page.companion) disposeCompanion(page);
   clearTimeout(page.progressTimer);
   if(page.account && page.account.progressSyncTimer){
     cancelProgressSync(page.account);
@@ -982,6 +1039,7 @@ async function loadPdfReader(page, pdf, status, link, zoomOut, zoomIn){
     if(!currentPdfReader(page)) return;
     var viewport = first.getViewport({scale:1});
     releasePages = mountPdfPages(page, pdfDocument, viewport.height / viewport.width, status, zoomOut, zoomIn);
+    page.pdfDocument = pdfDocument;
   }catch(error){
     if(currentPdfReader(page)){
       page.disposePdf();
@@ -1080,6 +1138,13 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
     }
     return low + 1;
   }
+  page.pdfCenter = function(){return pageAt(container.scrollTop + container.clientHeight / 2);};
+  page.showPdfQuote = function(number){
+    var element = slots[number - 1].element;
+    container.scrollTop = element.offsetTop - companionReadingHeight(page, container.clientHeight) / 3;
+    element.classList.add("companion-mark");
+    return function(){element.classList.remove("companion-mark");};
+  };
   function schedule(){
     if(!refreshFrame) refreshFrame = requestAnimationFrame(refresh);
   }
@@ -1178,12 +1243,15 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
       if(pdfPage && slot.pdfPage !== pdfPage) pdfPage.cleanup();
       if(currentPdfReader(page)) schedule();
     }
+    if(current() && slot.canvas && !page.companion) mountCompanion(page);
   }
   function onScroll(){page.captureScroll(); schedule();}
   container.addEventListener("scroll", onScroll, {passive:true});
   if(visualViewport) visualViewport.addEventListener("resize", onViewportResize);
-  zoomOut.addEventListener("click", function(){if(zoom > 0){zoom--; layout();}});
-  zoomIn.addEventListener("click", function(){if(zoom < zooms.length - 1){zoom++; layout();}});
+  function zoomDown(){if(zoom > 0){zoom--; layout();}}
+  function zoomUp(){if(zoom < zooms.length - 1){zoom++; layout();}}
+  zoomOut.addEventListener("click", zoomDown);
+  zoomIn.addEventListener("click", zoomUp);
   layout();
   var resize = new ResizeObserver(function(){if(currentPdfReader(page)) layout();});
   resize.observe(container);
@@ -1191,6 +1259,8 @@ function mountPdfPages(page, pdfDocument, defaultRatio, status, zoomOut, zoomIn)
     resize.disconnect();
     observer.disconnect();
     container.removeEventListener("scroll", onScroll);
+    zoomOut.removeEventListener("click", zoomDown);
+    zoomIn.removeEventListener("click", zoomUp);
     if(visualViewport) visualViewport.removeEventListener("resize", onViewportResize);
     clearTimeout(viewportResizeTimer);
     cancelAnimationFrame(refreshFrame);
@@ -1248,6 +1318,8 @@ function renderReader(it){
   var previous = status || readerPage.frame;
   if(readerPage.captureScroll) readerPage.captureScroll();
   var position = readerPage.readPosition ? readerPage.readPosition(true) : pos;
+  if(readerPage.disposeFrame) readerPage.disposeFrame();
+  if(readerPage.companion) detachArticleCompanion(readerPage.companion);
   var frame = document.createElement("iframe");
   frame.className = "reader-frame";
   frame.title = "文章正文";
@@ -1257,6 +1329,605 @@ function renderReader(it){
   readerPage.frame = frame;
   watchReaderFrame(readerPage, frame, position);
   previous.replaceWith(frame);
+}
+
+/* ---------- AI reading companion ---------- */
+var COMPANION_SHORTCUTS = [
+  ["白話解釋", "用白話解釋這段，必要時解釋專有名詞。"],
+  ["這段重點", "這段在整篇裡起什麼作用？重點是什麼？"],
+  ["質疑一下", "這段的論點和證據站得住嗎？有哪些反方觀點或缺漏？"],
+  ["背景知識", "讀懂這段需要哪些背景知識？"],
+  ["考考我", "考考我：問我 2 個關於這篇文章的問題，先不要給答案。"]
+];
+var COMPANION_ERRORS = {
+  no_key:"AI 伴讀還沒設定好（缺少 DeepSeek 金鑰）。",
+  bad_key:"DeepSeek 金鑰無效，請檢查 Supabase 裡的設定。",
+  no_balance:"DeepSeek 餘額不足，請儲值後再試。",
+  busy:"DeepSeek 目前太忙，稍後再試。",
+  no_article:"找不到這篇的正文。",
+  401:"登入已過期，請重新登入。",
+  ai_failed:"沒有連上 AI，請再試一次。"
+};
+function companionElement(tag, className, value){
+  var el = document.createElement(tag);
+  if(className) el.className = className;
+  if(value !== undefined) el.textContent = value;
+  return el;
+}
+async function readChats(account, id, signal){
+  try{
+    var query = client.from("readlater_chats").select("messages").eq("user_id", account.user.id).eq("item_id", id).maybeSingle();
+    var result = await (signal ? query.abortSignal(signal) : query);
+    if(!result.error && result.data && Array.isArray(result.data.messages)) return result.data.messages;
+  }catch(error){}
+  return [];
+}
+async function deleteChats(account, id){
+  try{
+    var query = client.from("readlater_chats").delete().eq("user_id", account.user.id);
+    if(id !== undefined) query = query.eq("item_id", id);
+    await query;
+  }catch(error){}
+}
+function companionHistory(messages){
+  var rounds = [], question = null;
+  messages.forEach(function(message){
+    if(!message) return;
+    if(message.role === "user"){
+      var shortcut = COMPANION_SHORTCUTS.find(function(entry){return entry[1] === message.question;});
+      question = shortcut ? shortcut[0] : message.question;
+    }else if(message.role === "assistant" && typeof question === "string" && typeof message.content === "string"){
+      rounds.push({question:question, answer:message.content, complete:true});
+      question = null;
+    }
+  });
+  return rounds;
+}
+async function loadCompanionUsage(account, month, el){
+  try{
+    var result = await client.from("readlater_ai_usage").select("requests,hit_tokens,miss_tokens,out_tokens")
+      .eq("user_id", account.user.id).eq("month", month).maybeSingle();
+    if(result.error || sync !== account || !el.isConnected) return;
+    var row = result.data || {requests:0, hit_tokens:0, miss_tokens:0, out_tokens:0};
+    var cost = (row.hit_tokens * 0.006 + row.miss_tokens * 0.3 + row.out_tokens * 1.2) / 1000000;
+    el.textContent = "本月提問 " + row.requests + " 次 · " + (cost < 0.01 ? "不到 US$0.01" : "約 US$" + cost.toFixed(2));
+  }catch(error){}
+}
+function mountCompanion(page){
+  if(page.companion || !page.account || !currentPdfReader(page)) return;
+  var layer = companionElement("div", "companion-layer");
+  layer.innerHTML = '<div class="companion-shade" aria-hidden="true"></div>' +
+    '<button class="btn primary companion-ask" type="button" aria-controls="companion-panel" aria-expanded="false">問</button>' +
+    '<section class="companion-panel" id="companion-panel" aria-label="AI 伴讀" tabindex="-1" inert>' +
+    '<div class="companion-handle" aria-hidden="true"></div><div class="companion-head">' +
+    '<span class="hint companion-focus"></span><button class="companion-close" type="button" aria-label="收起 AI 伴讀">×</button></div>' +
+    '<div class="companion-chat" tabindex="0" aria-label="問答"><p class="hint companion-history" role="status"></p></div>' +
+    '<p class="hint companion-pdf-status" role="status" hidden></p><div class="companion-shortcuts"></div>' +
+    '<label class="companion-options hint"><input type="checkbox">想深一點</label>' +
+    '<form class="companion-form"><textarea rows="1" maxlength="2000" aria-label="問題"></textarea>' +
+    '<button class="btn primary" type="submit">送出</button></form></section>';
+  var listeners = new AbortController();
+  var signal = listeners.signal;
+  var chat = page.companion = {
+    layer:layer, listeners:listeners, rounds:[], actions:new WeakMap(), pdfState:page.isPdf ? "loading" : "ready",
+    ask:layer.querySelector(".companion-ask"), panel:layer.querySelector(".companion-panel"),
+    focus:layer.querySelector(".companion-focus"), log:layer.querySelector(".companion-chat"),
+    historyStatus:layer.querySelector(".companion-history"), pdfStatus:layer.querySelector(".companion-pdf-status"),
+    input:layer.querySelector("textarea"), send:layer.querySelector("[type=submit]"), deep:layer.querySelector("input"),
+    shortcuts:COMPANION_SHORTCUTS.map(function(entry){
+      var button = companionElement("button", "btn", entry[0]);
+      button.type = "button";
+      button.addEventListener("click", function(){askCompanion(page, entry[1], entry[0]);}, {signal:signal});
+      layer.querySelector(".companion-shortcuts").append(button);
+      return button;
+    })
+  };
+  var top = readerEl.querySelector(".reader-top"), bottom = readerEl.querySelector(".reader-bottom");
+  function sizeLayer(){
+    layer.style.setProperty("--companion-top", top.offsetHeight + "px");
+    layer.style.setProperty("--companion-bottom", bottom.offsetHeight + "px");
+  }
+  chat.resize = new ResizeObserver(sizeLayer);
+  chat.resize.observe(top);
+  chat.resize.observe(bottom);
+  sizeLayer();
+  readerEl.append(layer);
+
+  try{chat.deep.checked = sessionStorage.getItem("readlater-companion-deep") === "1";}catch(error){}
+  chat.deep.addEventListener("change", function(){
+    try{sessionStorage.setItem("readlater-companion-deep", chat.deep.checked ? "1" : "0");}catch(error){}
+  }, {signal:signal});
+  layer.addEventListener("mousedown", function(event){
+    if(event.button === 0 && event.target.closest("button") && companionSelection(chat)) event.preventDefault();
+  }, {signal:signal});
+  chat.ask.addEventListener("click", function(event){
+    toggleCompanion(page, true);
+    if(!event.detail) chat.panel.focus({preventScroll:true});
+  }, {signal:signal});
+  layer.querySelector(".companion-close").addEventListener("click", function(){toggleCompanion(page, false);}, {signal:signal});
+  document.addEventListener("keydown", function(event){
+    if(sheetEl.hidden) companionEscape(page, event);
+  }, {capture:true, signal:signal});
+  window.addEventListener("pagehide", function(){
+    if(chat.request) chat.request.abort();
+  }, {signal:signal});
+  var handle = layer.querySelector(".companion-handle"), drag;
+  handle.addEventListener("pointerdown", function(event){
+    if(!event.isPrimary || event.button !== 0) return;
+    drag = {id:event.pointerId, y:event.clientY};
+    handle.setPointerCapture(event.pointerId);
+  }, {signal:signal});
+  handle.addEventListener("pointerup", function(event){
+    if(drag && drag.id === event.pointerId && event.clientY - drag.y > 60) toggleCompanion(page, false);
+  }, {signal:signal});
+  handle.addEventListener("lostpointercapture", function(){drag = null;}, {signal:signal});
+  layer.querySelector("form").addEventListener("submit", function(event){
+    event.preventDefault();
+    askCompanion(page, chat.input.value.trim());
+  }, {signal:signal});
+  chat.input.addEventListener("keydown", function(event){
+    if(event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    askCompanion(page, chat.input.value.trim());
+  }, {signal:signal});
+  chat.input.addEventListener("input", function(){sizeCompanionInput(chat);}, {signal:signal});
+  chat.log.addEventListener("click", function(event){
+    var action = chat.actions.get(event.target);
+    if(action) action();
+  }, {signal:signal});
+  chat.log.addEventListener("keydown", function(event){
+    if(event.key !== "Enter" && event.key !== " ") return;
+    if(!event.target.classList || !event.target.classList.contains("companion-quote")) return;
+    var action = chat.actions.get(event.target);
+    if(action){event.preventDefault(); action();}
+  }, {signal:signal});
+  updateCompanionContext(page);
+  updateCompanionControls(chat);
+  client.functions.invoke("companion", {body:{warm:true}}).catch(function(){});
+}
+function disposeCompanion(page){
+  var chat = page.companion;
+  chat.listeners.abort();
+  if(chat.request) chat.request.abort();
+  chat.resize.disconnect();
+  clearCompanionMark(chat);
+  chat.layer.remove();
+}
+function companionEscape(page, event){
+  if(event.key !== "Escape" || event.isComposing || !page.companion.open || event.defaultPrevented) return;
+  event.preventDefault();
+  toggleCompanion(page, false);
+}
+function attachArticleCompanion(page, doc, signal){
+  if(!page.article.content_html || !page.article.content_html.trim()) return;
+  mountCompanion(page);
+  var chat = page.companion;
+  if(!chat) return;
+  chat.doc = doc;
+  doc.addEventListener("selectionchange", function(){updateCompanionContext(page);}, {signal:signal});
+  doc.addEventListener("keydown", function(event){companionEscape(page, event);}, {signal:signal});
+  updateCompanionContext(page);
+  refreshCompanionQuotes(page);
+}
+function detachArticleCompanion(chat){
+  clearCompanionMark(chat);
+  chat.doc = null;
+  chat.articleIndex = null;
+}
+function companionSelection(chat){
+  var selection = chat.doc && chat.doc.getSelection();
+  return selection ? selection.toString().trim() : "";
+}
+function updateCompanionContext(page){
+  var chat = page.companion;
+  if(!page.isPdf){
+    var selection = companionSelection(chat);
+    chat.ask.textContent = selection ? "問這段" : "問";
+    var preview = Array.from(selection.replace(/\s+/g, " "));
+    chat.focus.textContent = preview.length
+      ? "針對：「" + preview.slice(0, 40).join("") + (preview.length > 40 ? "…" : "") + "」"
+      : "針對：目前讀到的段落";
+  }
+  updateCompanionProgress(page);
+}
+function updateCompanionProgress(page){
+  var chat = page.companion;
+  if(page.isPdf){
+    var focus = "針對：第 " + page.pdfCenter() + " 頁";
+    if(chat.focus.textContent !== focus) chat.focus.textContent = focus;
+  }
+  chat.shortcuts[4].hidden = page.readPosition() < 0.85;
+}
+function sizeCompanionInput(chat){
+  var input = chat.input, follow = companionAtBottom(chat.log);
+  input.style.height = "auto";
+  input.style.height = Math.min(110, input.scrollHeight + 2) + "px";
+  if(follow) chat.log.scrollTop = chat.log.scrollHeight;
+}
+function updateCompanionControls(chat){
+  var allowed = chat.pdfState === "ready", busy = Boolean(chat.request), disabled = !allowed || busy;
+  chat.input.disabled = !allowed;
+  chat.shortcuts.forEach(function(button){button.disabled = disabled;});
+  chat.rounds.forEach(function(round){if(round.retry) round.retry.disabled = disabled;});
+  chat.send.disabled = disabled;
+  chat.send.textContent = busy ? "回答中…" : "送出";
+}
+function toggleCompanion(page, open){
+  var chat = page.companion;
+  var returnFocus = !open && chat.panel.contains(document.activeElement);
+  chat.open = open;
+  chat.layer.classList.toggle("open", open);
+  chat.ask.hidden = open;
+  chat.ask.setAttribute("aria-expanded", String(open));
+  chat.panel.inert = !open;
+  if(!open){
+    if(returnFocus) chat.ask.focus({preventScroll:true});
+    return;
+  }
+  updateCompanionContext(page);
+  sizeCompanionInput(chat);
+  if(!chat.historyStarted){
+    chat.historyStarted = true;
+    loadCompanionHistory(page);
+  }
+  if(page.isPdf && !page.pdfTextTask) page.pdfTextTask = loadCompanionPdfText(page);
+}
+function companionAtBottom(log){
+  return log.scrollHeight - log.clientHeight - log.scrollTop <= 2;
+}
+async function loadCompanionHistory(page){
+  var chat = page.companion, status = chat.historyStatus, signal = chat.listeners.signal;
+  status.textContent = "載入問答…";
+  var history = companionHistory(await readChats(page.account, page.id, signal));
+  if(signal.aborted) return;
+  var log = chat.log, follow = companionAtBottom(log), height = log.scrollHeight;
+  var fragment = document.createDocumentFragment();
+  history.forEach(function(round){fragment.append(buildCompanionRound(page, round));});
+  chat.rounds.unshift(...history);
+  status.hidden = chat.rounds.length > 0;
+  status.textContent = "問任何關於這篇的問題。回答會根據文章，引文可點回原文。";
+  log.insertBefore(fragment, status.nextSibling);
+  log.scrollTop = follow ? log.scrollHeight : log.scrollTop + log.scrollHeight - height;
+}
+async function loadCompanionPdfText(page){
+  var chat = page.companion, status = chat.pdfStatus, pdf = page.pdfDocument;
+  status.hidden = false;
+  status.textContent = "正在讀取 PDF 文字…";
+  var text = "", count = 0, pages = [];
+  try{
+    for(var number = 1; number <= pdf.numPages; number++){
+      var pdfPage = await pdf.getPage(number);
+      if(chat.listeners.signal.aborted) return;
+      var content = await pdfPage.getTextContent();
+      if(chat.listeners.signal.aborted) return;
+      var pageText = content.items.map(function(item){
+        return typeof item.str === "string" ? item.str + (item.hasEOL ? "\n" : " ") : "";
+      }).join("").trim();
+      pages.push({text:pageText, searchable:normalizeCompanionText(pageText)});
+      count += pages[pages.length - 1].searchable.length;
+      if(text.length < 120000){
+        var heading = number === 1 ? "" : "\n\n〔第 " + number + " 頁〕\n";
+        text += (heading + pageText).slice(0, 120000 - text.length);
+      }
+    }
+    page.pdfText = text;
+    page.pdfTextPages = pages;
+    chat.pdfState = count < 50 ? "image" : "ready";
+    status.hidden = chat.pdfState === "ready";
+    status.textContent = chat.pdfState === "image" ? "這份 PDF 是圖片，AI 讀不到文字" : "";
+    refreshCompanionQuotes(page);
+  }catch(error){
+    if(chat.listeners.signal.aborted) return;
+    chat.pdfState = "failed";
+    status.textContent = "PDF 文字暫時讀不到";
+  }
+  updateCompanionControls(chat);
+}
+function normalizeCompanionText(text){return text.replace(/\s/g, "");}
+var COMPANION_BLOCKS = "p,li,blockquote,figcaption,pre,td,th,h1,h2,h3,h4,h5,h6,div,section,article,main";
+function companionArticleIndex(chat){
+  if(!chat.doc) return null;
+  if(!chat.articleIndex){
+    var root = chat.doc.querySelector("main");
+    var walker = chat.doc.createTreeWalker(root, NodeFilter.SHOW_TEXT), node, pieces = [], length = 0;
+    while((node = walker.nextNode())){
+      if(node.parentElement.closest("script,style,template,[hidden]")) continue;
+      var text = normalizeCompanionText(node.data);
+      if(!text) continue;
+      pieces.push({text:text, node:node, start:length, block:node.parentElement.closest(COMPANION_BLOCKS)});
+      length += text.length;
+    }
+    chat.articleIndex = {pieces:pieces, text:pieces.map(function(piece){return piece.text;}).join("")};
+  }
+  return chat.articleIndex;
+}
+function companionArticleFocus(chat){
+  var index = companionArticleIndex(chat);
+  if(!index || !index.pieces.length) return "";
+  var doc = chat.doc, win = doc.defaultView, x = win.innerWidth / 2, y = win.innerHeight / 2;
+  var hit = doc.elementFromPoint(x, y), hitBlock = hit && hit.closest(COMPANION_BLOCKS), blocks = [], last;
+  var caretNode, caretOffset;
+  if(doc.caretPositionFromPoint){
+    var caret = doc.caretPositionFromPoint(x, y);
+    if(caret){caretNode = caret.offsetNode; caretOffset = caret.offset;}
+  }else if(doc.caretRangeFromPoint){
+    var range = doc.caretRangeFromPoint(x, y);
+    if(range){caretNode = range.startContainer; caretOffset = range.startOffset;}
+  }
+  index.pieces.forEach(function(piece){
+    if(!last || last.element !== piece.block){
+      last = {element:piece.block, parts:[]};
+      blocks.push(last);
+    }
+    if(piece.node === caretNode) last.caret = last.parts.join("").length + caretOffset;
+    last.parts.push(piece.node.data);
+  });
+  var nearest = blocks.findIndex(function(block){return block.caret !== undefined;});
+  if(nearest < 0) nearest = blocks.findIndex(function(block){return block.element === hitBlock;});
+  if(nearest < 0){
+    var distance = Infinity;
+    blocks.forEach(function(block, i){
+      var rect = block.element.getBoundingClientRect();
+      if(!rect.height) return;
+      var score = Math.max(rect.top - y, y - rect.bottom, 0);
+      if(score < distance){distance = score; nearest = i;}
+    });
+  }
+  if(nearest < 0) return "";
+  function paragraph(i){return blocks[i].parts.join("").replace(/\s+/g, " ").trim();}
+  var focus = paragraph(nearest), remaining = 600 - focus.length;
+  if(remaining <= 0){
+    var block = blocks[nearest];
+    var offset = block.parts.join("").slice(0, block.caret || 0).replace(/\s+/g, " ").trimStart().length;
+    var start = Math.max(0, Math.min(offset - 300, focus.length - 600));
+    return focus.slice(start, start + 600);
+  }
+  var before = "", after = "";
+  for(var i = nearest - 1; i >= 0 && before.length < remaining; i--) before = paragraph(i) + "\n" + before;
+  for(var j = nearest + 1; j < blocks.length && after.length < remaining; j++) after += "\n" + paragraph(j);
+  var left = Math.min(before.length, Math.max(Math.floor(remaining / 2), remaining - after.length));
+  return (before.slice(before.length - left) + focus + after.slice(0, remaining - left)).trim();
+}
+function companionReadingHeight(page, height){
+  var panel = page.companion.panel;
+  return page.companion.open && panel.offsetWidth === panel.parentElement.clientWidth
+    ? Math.max(0, height - panel.offsetHeight) : height;
+}
+function companionQuoteTarget(page, quote){
+  var text = normalizeCompanionText(quote);
+  if(!text) return null;
+  if(page.isPdf){
+    var pages = page.pdfTextPages;
+    var i = pages ? pages.findIndex(function(entry){return entry.searchable.includes(text);}) : -1;
+    return i < 0 ? null : i + 1;
+  }
+  var index = companionArticleIndex(page.companion);
+  var start = index ? index.text.indexOf(text) : -1;
+  return start < 0 ? null : {index:index, start:start, end:start + text.length};
+}
+function clearCompanionMark(chat){
+  clearTimeout(chat.markTimer);
+  if(chat.removeMark) chat.removeMark();
+  chat.removeMark = null;
+}
+function markCompanionArticle(page, target){
+  var chat = page.companion, doc = chat.doc, marks = [];
+  target.index.pieces.forEach(function(piece){
+    var end = piece.start + piece.text.length;
+    if(end <= target.start || piece.start >= target.end) return;
+    var first = Math.max(target.start - piece.start, 0), last = Math.min(target.end, end) - piece.start;
+    var offset = 0, startOffset, endOffset, raw = piece.node.data;
+    for(var i = 0; i < raw.length; i++){
+      if(/\s/.test(raw[i])) continue;
+      if(offset === first) startOffset = i;
+      if(++offset === last){endOffset = i + 1; break;}
+    }
+    var range = doc.createRange();
+    range.setStart(piece.node, startOffset);
+    range.setEnd(piece.node, endOffset);
+    var mark = doc.createElement("mark");
+    range.surroundContents(mark);
+    marks.push(mark);
+  });
+  var win = doc.defaultView, rect = marks[0].getBoundingClientRect();
+  win.scrollTo(0, win.scrollY + rect.top - companionReadingHeight(page, win.innerHeight) / 3);
+  chat.articleIndex = null;
+  return function(){
+    marks.forEach(function(mark){
+      var parent = mark.parentNode;
+      if(!parent) return;
+      mark.replaceWith(...mark.childNodes);
+      parent.normalize();
+    });
+    chat.articleIndex = null;
+  };
+}
+function showCompanionQuote(page, quote){
+  var chat = page.companion;
+  clearCompanionMark(chat);
+  var target = companionQuoteTarget(page, quote);
+  if(target === null) return;
+  chat.removeMark = page.isPdf ? page.showPdfQuote(target) : markCompanionArticle(page, target);
+  chat.markTimer = setTimeout(function(){clearCompanionMark(chat);}, 1600);
+}
+function appendCompanionText(page, element, text, complete){
+  var pattern = /（文章外補充）|「([^」\n]+)」/g, match, offset = 0;
+  while((match = pattern.exec(text))){
+    element.append(text.slice(offset, match.index));
+    var quote = match[1];
+    if(!quote){
+      element.append(companionElement("small", "hint", match[0]));
+    }else if(complete && Array.from(quote).length >= 6 && companionQuoteTarget(page, quote) !== null){
+      // <button> 一律排成 inline-block，長引文會獨佔一行；改用可聚焦的行內 span。
+      var button = companionElement("span", "companion-quote", match[0]);
+      button.setAttribute("role", "button");
+      button.tabIndex = 0;
+      page.companion.actions.set(button, showCompanionQuote.bind(null, page, quote));
+      element.append(button);
+    }else{
+      element.append(match[0]);
+    }
+    offset = pattern.lastIndex;
+  }
+  element.append(text.slice(offset));
+}
+function buildCompanionRound(page, round){
+  var turn = companionElement("div", "companion-turn");
+  round.reply = companionElement("div", "companion-answer");
+  turn.append(companionElement("div", "companion-question", round.question), round.reply);
+  renderCompanionAnswer(page, round);
+  return turn;
+}
+function renderCompanionAnswer(page, round){
+  var reply = round.reply, fragment = document.createDocumentFragment(), list;
+  if(round.answer){
+    round.answer.split(/\r?\n/).forEach(function(line){
+      if(line.startsWith("- ")){
+        if(!list){list = companionElement("ul"); fragment.append(list);}
+        var item = companionElement("li");
+        appendCompanionText(page, item, line.slice(2), round.complete);
+        list.append(item);
+      }else{
+        list = null;
+        if(!line.trim()) return;
+        var paragraph = companionElement("p");
+        appendCompanionText(page, paragraph, line, round.complete);
+        fragment.append(paragraph);
+      }
+    });
+  }else if(round.thinking){
+    fragment.append(companionElement("p", "hint", "思考中…"));
+  }
+  round.retry = null;
+  if(round.error){
+    var label = Object.hasOwn(COMPANION_ERRORS, round.error) ? COMPANION_ERRORS[round.error] : COMPANION_ERRORS.ai_failed;
+    var error = companionElement("p", "err", label);
+    var retry = round.retry = companionElement("button", "btn companion-retry", "重試");
+    retry.type = "button";
+    retry.disabled = Boolean(page.companion.request);
+    page.companion.actions.set(retry, requestCompanion.bind(null, page, round));
+    error.append(retry);
+    fragment.append(error);
+  }
+  if(round.unsaved) fragment.append(companionElement("p", "hint", "這則沒存到雲端"));
+  reply.replaceChildren(fragment);
+}
+function refreshCompanionQuotes(page){
+  var chat = page.companion, follow = companionAtBottom(chat.log);
+  chat.rounds.forEach(function(round){if(round.complete) renderCompanionAnswer(page, round);});
+  if(follow) chat.log.scrollTop = chat.log.scrollHeight;
+}
+function companionPayload(page, it, question){
+  var chat = page.companion;
+  var payload = {itemId:page.id, title:page.article && page.article.title || it.title,
+    site:readerEl.querySelector(".reader-site").textContent || it.platform, question:question, deep:chat.deep.checked};
+  if(page.isPdf){
+    payload.text = page.pdfText;
+    payload.focus = page.pdfTextPages[page.pdfCenter() - 1].text.slice(0, 1500);
+  }else{
+    payload.focus = companionArticleFocus(chat);
+    var selection = companionSelection(chat);
+    if(selection) payload.selection = selection.slice(0, 1500);
+  }
+  return payload;
+}
+function canAskCompanion(page){
+  var chat = page.companion;
+  return currentPdfReader(page) && !chat.request && chat.pdfState === "ready" && (page.isPdf || chat.doc);
+}
+function askCompanion(page, question, label){
+  if(!question || !canAskCompanion(page)) return;
+  var chat = page.companion;
+  var round = {question:label || question, prompt:question, answer:""};
+  var follow = companionAtBottom(chat.log);
+  if(!label){
+    chat.input.value = "";
+    sizeCompanionInput(chat);
+  }
+  if(chat.historyStarted && chat.historyStatus.textContent !== "載入問答…") chat.historyStatus.hidden = true;
+  chat.rounds.push(round);
+  chat.log.append(buildCompanionRound(page, round));
+  if(follow) chat.log.scrollTop = chat.log.scrollHeight;
+  requestCompanion(page, round);
+}
+async function streamCompanion(response, onRecord){
+  var reader = response.body.getReader(), decoder = new TextDecoder(), buffer = "";
+  try{
+    while(true){
+      var chunk = await reader.read();
+      buffer += chunk.done ? decoder.decode() : decoder.decode(chunk.value, {stream:true});
+      var lines = buffer.split("\n");
+      buffer = chunk.done ? "" : lines.pop();
+      for(var line of lines){
+        if(!line.trim()) continue;
+        var record = JSON.parse(line);
+        onRecord(record);
+        if(record.error || record.done === true) return record;
+      }
+      if(chunk.done) throw new Error("Incomplete companion response");
+    }
+  }finally{
+    reader.cancel().catch(function(){});
+    reader.releaseLock();
+  }
+}
+async function requestCompanion(page, round){
+  var chat = page.companion, it = find(page.id);
+  if(!it || !canAskCompanion(page)) return;
+  var payload = companionPayload(page, it, round.prompt);
+  var request = chat.request = new AbortController(), signal = request.signal;
+  function paint(){
+    if(chat.listeners.signal.aborted || !currentPdfReader(page)) return;
+    var follow = companionAtBottom(chat.log);
+    renderCompanionAnswer(page, round);
+    if(follow) chat.log.scrollTop = chat.log.scrollHeight;
+  }
+  round.answer = "";
+  round.thinking = round.complete = round.unsaved = false;
+  round.error = null;
+  updateCompanionControls(chat);
+  paint();
+  try{
+    var result = await client.auth.getSession();
+    if(signal.aborted) return;
+    var session = result.data && result.data.session;
+    if(!session || !session.access_token || !session.user || session.user.id !== page.account.user.id){round.error = "401"; return;}
+    var response = await fetch(SUPABASE_URL + "/functions/v1/companion", {
+      method:"POST", headers:{Authorization:"Bearer " + session.access_token, apikey:SUPABASE_KEY, "Content-Type":"application/json"},
+      body:JSON.stringify(payload), signal:signal
+    });
+    if(response.status === 401){round.error = "401"; return;}
+    var type = response.headers.get("Content-Type") || "";
+    if(type.includes("application/json")){
+      var failure = await response.json();
+      round.error = failure && failure.error || "ai_failed";
+      return;
+    }
+    if(!response.ok || !response.body) throw new Error("Invalid companion response");
+    var end = await streamCompanion(response, function(record){
+      if(typeof record.t === "string" && record.t){
+        round.answer += record.t;
+        round.thinking = false;
+        paint();
+      }else if(record.thinking && !round.answer){
+        round.thinking = true;
+        paint();
+      }
+    });
+    round.error = end.error || null;
+    round.complete = end.done === true && !round.error;
+    round.unsaved = round.complete && end.saved === false;
+  }catch(error){
+    round.error = "ai_failed";
+  }finally{
+    chat.request = null;
+    round.thinking = false;
+    if(!chat.listeners.signal.aborted && currentPdfReader(page)){
+      if(signal.aborted && !round.complete) round.error = "ai_failed";
+      paint();
+      updateCompanionControls(chat);
+    }
+  }
 }
 function render(){
   if(startupErrorShown) return;
@@ -1286,6 +1957,8 @@ function render(){
   }
   renderHead();
   document.getElementById("view").innerHTML = t === "shelf" ? viewShelf() : t === "graveyard" ? viewGraveyard() : t === "notes" ? viewNotes() : viewMe();
+  var usage = document.getElementById("companion-usage");
+  if(usage) loadCompanionUsage(sync, new Date().toISOString().slice(0, 7), usage);
   document.getElementById("tabs").innerHTML = TABS.map(function(x){return '<a href="#' + x[0] + '"' + (x[0] === t ? ' aria-current="page"' : "") + '>' + x[1] + '</a>';}).join("");
   var fab = document.getElementById("fab"), full = active().length >= slotCap(state.xp);
   fab.hidden = t !== "shelf";
@@ -1612,8 +2285,24 @@ function submitAdd(){
 function sheetRead(it){
   openSheet('<h3>讀完了</h3><p class="lead">' + esc(it.title) + '</p><form id="f-read" data-id="' + it.id + '" novalidate>' +
     '<div><label for="read-note">用一句話寫下收穫（至少 ' + MIN_NOTE + ' 個字）</label><textarea id="read-note" maxlength="300"></textarea></div>' +
-    '<p class="err" id="read-err"></p>' +
+    '<div id="companion-review" hidden></div><p class="err" id="read-err"></p>' +
     '<div class="row"><button class="btn primary" type="submit" style="flex:1">提交，獲得 ' + XP[it.size] + ' 分</button><button class="btn" type="button" data-act="close">取消</button></div></form>');
+  if(sync) loadCompanionReview(sync, it.id, document.getElementById("companion-review"));
+}
+async function loadCompanionReview(account, id, target){
+  var rounds = companionHistory(await readChats(account, id));
+  if(!rounds.length || sync !== account || !target.isConnected) return;
+  var details = companionElement("details", "companion-review hint");
+  details.append(companionElement("summary", "", "回顧問答（" + rounds.length + " 則）"));
+  rounds.forEach(function(round){
+    var entry = companionElement("p");
+    var preview = Array.from(round.answer);
+    entry.append(companionElement("strong", "", round.question), document.createElement("br"),
+      document.createTextNode(preview.slice(0, 80).join("") + (preview.length > 80 ? "…" : "")));
+    details.append(entry);
+  });
+  target.append(details);
+  target.hidden = false;
 }
 function submitRead(id){
   var it = find(id), note = document.getElementById("read-note").value.trim();
@@ -1673,7 +2362,7 @@ document.addEventListener("click", function(e){
     sheetRead(it);
   }
   else if(act === "open-drop" && it) sheetDrop(it);
-  else if(act === "confirm-drop" && it && it.status === "active"){ it.status = "dropped"; it.endedAt = Date.now(); deletePdf(it); closeSheet(); commit(); toast("已送進墓地"); }
+  else if(act === "confirm-drop" && it && it.status === "active"){ it.status = "dropped"; it.endedAt = Date.now(); deleteReaderData(it); closeSheet(); commit(); toast("已送進墓地"); }
   else if(act === "close") closeSheet();
   else if(act === "start"){ demo = false; state = fresh(); commit(); location.hash = "shelf"; toast("示例已清空，存入你的第一篇吧"); }
   else if(act === "open-signout") sheetSignOut();
@@ -1681,9 +2370,9 @@ document.addEventListener("click", function(e){
   else if(act === "open-import") sheetImport();
   else if(act === "open-reset") sheetReset();
   else if(act === "confirm-reset"){
-    bootExpiredPdfs = null;
+    bootExpiredItems = null;
     demo = false; state = fresh(); closeSheet(); commit(true); toast("已清空");
-    if(sync){deleteArticles(sync); deleteAllPdfs(sync);}
+    if(sync){deleteArticles(sync); deleteChats(sync); deleteAllPdfs(sync);}
   }
   else if(act === "copy-backup"){
     var text = JSON.stringify(state);
@@ -1694,8 +2383,7 @@ document.addEventListener("click", function(e){
     try{
       var o = JSON.parse(document.getElementById("imp-text").value);
       if(!o || !Array.isArray(o.items) || typeof o.xp !== "number") throw new Error("shape");
-      bootExpiredPdfs = null;
-      bootExpiredPdfs = null;
+      bootExpiredItems = null;
       o.started = true; state = o; demo = false; settle(); closeSheet(); commit(true); toast("已還原");
     }catch(err){ errEl.textContent = "這段文字不是有效的備份。請確認完整貼上。"; }
   }
@@ -1746,9 +2434,9 @@ window.addEventListener("offline", renderHead);
     state = cache;
     var account = readSync();
     settle(function(it){
-      if(!account || !it.pdf) return;
-      if(!bootExpiredPdfs) bootExpiredPdfs = {userId:account.userId, ids:[]};
-      bootExpiredPdfs.ids.push(it.id);
+      if(!account) return;
+      if(!bootExpiredItems) bootExpiredItems = {userId:account.userId, ids:[]};
+      bootExpiredItems.ids.push(it.id);
     });
   }
   else { state = demoState(); demo = true; }
