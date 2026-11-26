@@ -259,16 +259,22 @@ function demoState(){
 /* ---------- persistence ---------- */
 function readLocal(){try{var s = localStorage.getItem(LS_KEY); return s ? JSON.parse(s) : null;}catch(e){return null;}}
 function writeLocal(){try{localStorage.setItem(LS_KEY, JSON.stringify(state));}catch(e){}}
+function commitQuiet(replace){
+  if(demo) return;
+  state.updatedAt = Date.now();
+  if(sync){
+    sync.pending = true;
+    sync.revision++;
+    if(replace === true) sync.replacement = {};
+  }
+  writeLocal();
+  if(sync) writeSync(sync);
+}
 function commit(replace){
-  if(!demo){
-    state.updatedAt = Date.now();
-    if(sync){
-      sync.pending = true;
-      sync.revision++;
-      if(replace === true) sync.replacement = {};
-    }
-    writeLocal();
-    if(sync){writeSync(sync); flush(sync);}
+  commitQuiet(replace);
+  if(!demo && sync){
+    cancelProgressSync(sync);
+    flush(sync);
   }
   render();
 }
@@ -463,8 +469,11 @@ async function runSync(current){
       if(current.replacement && current.replacement !== pulledForReplacement) continue;
     }
     if(!current.pending) continue;
+    var revision = current.revision;
     if(await push(current)){
       conflicts = 0;
+      // 已送出所有要求立即上傳的版本，其餘閱讀進度留給計時器。
+      if(!current.pullRequested && current.progressSyncTimer && current.flushRevision <= revision) break;
     }else{
       if(++conflicts > (current.replacement ? 1 : 3)) throw new Error("conflict");
       current.pullRequested = true;
@@ -472,13 +481,16 @@ async function runSync(current){
   }
 }
 function flush(current){
-  if(current.running || current.paused) return;
+  if(current.paused) return;
+  current.flushRevision = current.revision;
+  if(current.running) return;
   current.error = false;
   current.running = runSync(current).catch(function(){
     current.error = true;
     current.pullRequested = true;
   }).finally(function(){
     current.running = null;
+    current.keepalive = false;
     if(current === sync) render();
   });
   renderHead();
@@ -525,7 +537,14 @@ function setSession(session){
 }
 function initSupabase(){
   if(!SUPABASE_URL || !SUPABASE_KEY || !window.supabase) return;
-  try{client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);}
+  try{
+    client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {global:{fetch:function(input, init){
+      if(sync && sync.keepalive && init && typeof init.body === "string" && init.body.length < 60000){
+        init = Object.assign({}, init, {keepalive:true});
+      }
+      return window.fetch(input, init);
+    }}});
+  }
   catch(e){return;}
   loading = true;
   var authEvent = 0;
@@ -735,7 +754,7 @@ function openReader(it){
   render();
 }
 function closeReader(){
-  saveReaderProgress();
+  flushReaderProgress();
   var from = history.state && history.state.readerFrom;
   if(TABS.some(function(t){return t[0] === from;})) history.back();
   else{
@@ -756,8 +775,30 @@ function saveReaderProgress(){
   if(Math.abs(pos - Math.round((it.pos || 0) * 10000)) < 50) return false;
   it.pos = pos / 10000;
   it.posAt = Date.now();
-  commit();
+  commitQuiet();
   return true;
+}
+function scheduleProgressSync(current){
+  if(current.progressSyncTimer) return;
+  current.progressSyncTimer = setTimeout(function(){
+    current.progressSyncTimer = null;
+    if(current === sync && current.pending) flush(current);
+  }, 5000);
+}
+function cancelProgressSync(current){
+  clearTimeout(current.progressSyncTimer);
+  current.progressSyncTimer = null;
+}
+function flushReaderProgress(keepalive){
+  var saved = saveReaderProgress();
+  if(sync){
+    cancelProgressSync(sync);
+    if(sync.pending && !sync.paused){
+      if(keepalive) sync.keepalive = true;
+      flush(sync);
+    }
+  }
+  return saved;
 }
 function watchReaderScroll(page, position, scroll){
   var lastY, userScrolled = false;
@@ -790,7 +831,9 @@ function watchReaderScroll(page, position, scroll){
     var it = find(page.id);
     if(!it || it.status !== "active") return;
     clearTimeout(page.progressTimer);
-    page.progressTimer = setTimeout(saveReaderProgress, 1500);
+    page.progressTimer = setTimeout(function(){
+      if(saveReaderProgress() && sync) scheduleProgressSync(sync);
+    }, 500);
   }
   page.captureScroll = onScroll;
   return {restore:restore, move:move, userScrolled:function(){return userScrolled;}};
@@ -859,6 +902,10 @@ function disposeReaderPage(){
   var page = readerPage;
   readerPage = null;
   clearTimeout(page.progressTimer);
+  if(page.account && page.account.progressSyncTimer){
+    cancelProgressSync(page.account);
+    if(page.account === sync && sync.pending) flush(sync);
+  }
   if(page.disposePdf) page.disposePdf();
 }
 function readerDocument(it, article, theme){
@@ -1572,7 +1619,7 @@ function submitRead(id){
   var it = find(id), note = document.getElementById("read-note").value.trim();
   if(!it || it.status !== "active"){closeSheet(); return;}
   if(note.length < MIN_NOTE){document.getElementById("read-err").textContent = "還差 " + (MIN_NOTE - note.length) + " 個字。"; return;}
-  if(it.pdf && readerPage && readerPage.id === id) saveReaderProgress();
+  if(readerPage && readerPage.id === id) saveReaderProgress();
   var now = Date.now(), before = level(state.xp), wk = weekIdx(now);
   it.status = "read"; it.endedAt = now; it.takeaway = note;
   state.xp += XP[it.size];
@@ -1622,7 +1669,7 @@ document.addEventListener("click", function(e){
   }
   else if(act === "close-reader") closeReader();
   else if(act === "open-read" && it){
-    if(tab() === "reader") saveReaderProgress();
+    if(tab() === "reader" && flushReaderProgress()) render();
     sheetRead(it);
   }
   else if(act === "open-drop" && it) sheetDrop(it);
@@ -1674,17 +1721,20 @@ document.addEventListener("change", function(e){
 });
 document.addEventListener("keydown", function(e){ if(e.key === "Escape" && !sheetEl.hidden) closeSheet(); });
 window.addEventListener("hashchange", function(){
-  if(readerPage && readerPage.hash !== location.hash && saveReaderProgress()) return;
+  if(readerPage && readerPage.hash !== location.hash) flushReaderProgress();
   render();
 });
 function updateReaderTheme(){if(tab() === "reader") render();}
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateReaderTheme);
 new MutationObserver(updateReaderTheme).observe(document.documentElement, {attributes:true, attributeFilter:["data-theme"]});
 document.addEventListener("visibilitychange", function(){
-  if(document.hidden) saveReaderProgress();
-  else refreshSync();
+  if(document.hidden) flushReaderProgress(true);
+  else{
+    if(sync) sync.keepalive = false;
+    refreshSync();
+  }
 });
-window.addEventListener("pagehide", saveReaderProgress);
+window.addEventListener("pagehide", function(){flushReaderProgress(true);});
 window.addEventListener("focus", function(){if(sync) refreshSync();});
 window.addEventListener("online", function(){if(sync) refreshSync();});
 window.addEventListener("offline", renderHead);
